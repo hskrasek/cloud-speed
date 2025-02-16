@@ -89,7 +89,7 @@ impl<'de> Visitor<'de> for TraceVisitor {
             .split("\n")
             .filter_map(|property| {
                 let mut split = property.split("=");
-                
+
                 if let (Some(key), Some(value)) = (split.next(), split.next()) {
                     Some((key.to_string(), value.to_string()))
                 } else {

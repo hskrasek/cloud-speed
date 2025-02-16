@@ -15,12 +15,16 @@ impl Client {
         }
     }
 
-    pub async fn send<R: Request>(&self, request: R) -> Result<R::Response, Box<dyn std::error::Error>> {
+    pub async fn send<R: Request>(
+        &self,
+        request: R,
+    ) -> Result<R::Response, Box<dyn std::error::Error>> {
         let endpoint = request.endpoint();
         let endpoint = endpoint.trim_matches('/');
         let url = format!("{}/{}", BASE_URL, endpoint);
 
-        let response = self.client
+        let response = self
+            .client
             .request(R::METHOD, &url)
             .headers(request.headers())
             .send()
@@ -30,14 +34,14 @@ impl Client {
         if let Some(ct_value) = response.headers().get(header::CONTENT_TYPE) {
             if let Ok(content_type) = ct_value.to_str() {
                 if content_type.starts_with("application/json") {
-                    return response.json::<R::Response>().await.map_err(Into::into)
+                    return response.json::<R::Response>().await.map_err(Into::into);
                 }
             }
         }
-        
+
         let text = response.text().await?;
         let deserialized = serde_plain::from_str(&text)?;
-        
+
         Ok(deserialized)
     }
 }

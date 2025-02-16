@@ -4,7 +4,7 @@ extern crate clap;
 mod cloudflare;
 
 use crate::cloudflare::client::Client;
-use crate::cloudflare::requests::trace::TraceRequest;
+use crate::cloudflare::requests::{locations::Locations, trace::TraceRequest};
 use clap::Parser;
 use tokio::time::Duration;
 
@@ -18,13 +18,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new();
 
-    //TODO: Add custom UA header to these request
-    let request = TraceRequest {};
-    let trace = client.send(request).await?;
+    let trace = client.send(TraceRequest {}).await?;
 
-    // let location = locations.get(&trace.colo).unwrap();
+    let locations = client.send(Locations {}).await?;
+    let location = locations.get(&trace.colo);
 
-    // println!("Server Location {} ({})", location.city, trace.colo);
+    println!("Server Location {} ({})", location.city, trace.colo);
     println!("Your IP {} ({})", trace.ip, trace.loc);
 
     Ok(())

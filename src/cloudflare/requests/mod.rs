@@ -1,8 +1,12 @@
 extern crate serde;
 
+pub mod locations;
 pub mod trace;
 
-use reqwest::{header::{HeaderMap, USER_AGENT}, Method};
+use reqwest::{
+    header::{HeaderMap, USER_AGENT},
+    Method,
+};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -21,12 +25,12 @@ pub trait Request {
 
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        
+
         headers.insert(
             USER_AGENT,
             format!("{}/{} ({})", NAME, VERSION, REPO).parse().unwrap(),
         );
-        
+
         headers
     }
 }
