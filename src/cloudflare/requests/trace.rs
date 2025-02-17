@@ -54,7 +54,7 @@ impl Default for Trace {
 pub(crate) struct TraceRequest {}
 
 impl Request for TraceRequest {
-    type Body = ();
+    type Body = &'static str;
 
     type Response = Trace;
 

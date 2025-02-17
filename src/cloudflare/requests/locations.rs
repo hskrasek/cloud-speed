@@ -19,7 +19,7 @@ pub(crate) struct Location {
 pub(crate) struct Locations {}
 
 impl Request for Locations {
-    type Body = ();
+    type Body = &'static str;
 
     type Response = LocationsResponse;
 
@@ -36,14 +36,3 @@ impl LocationsResponse {
             .expect("Location {} not found")
     }
 }
-
-// let locations: BTreeMap<String, Location> = reqwest::get("/locations")
-// .await?
-// .json::<Vec<Location>>()
-// .await?
-// .into_iter()
-// .map(|location: Location| {
-// let key = location.iata.clone();
-// (key, location)
-// })
-// .collect();

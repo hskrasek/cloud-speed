@@ -1,12 +1,12 @@
-#[allow(dead_code)]
 extern crate clap;
 
 mod cloudflare;
 
 use crate::cloudflare::client::Client;
-use crate::cloudflare::requests::{locations::Locations, trace::TraceRequest};
+use crate::cloudflare::requests::{download::Download, locations::Locations, trace::TraceRequest};
 use clap::Parser;
-use tokio::time::Duration;
+use std::time::Duration;
+use tokio::time::Instant;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -20,22 +20,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let trace = client.send(TraceRequest {}).await?;
 
-    let locations = client.send(Locations {}).await?;
-    let location = locations.get(&trace.colo);
+    let location = client.send(Locations {}).await?.get(&trace.colo);
+
+    let measurements = download_measurements(&client).await;
+
+    let latency = measure_latency(&measurements).await;
+    let jitter = measure_jitter(&measurements).await;
 
     println!("Server Location {} ({})", location.city, trace.colo);
     println!("Your IP {} ({})", trace.ip, trace.loc);
+    println!("Latency: {} ms", latency.as_millis());
+    println!("Jitter: {} ms", jitter);
 
     Ok(())
 }
 
-fn measure_speed(bytes: usize, duration: Duration) -> f64 {
-    let seconds = duration.as_secs_f64();
-    let bits = (bytes * 8) as f64;
+async fn measure_latency(measurements: &Vec<Duration>) -> Duration {
+    let latency = measurements
+        .iter()
+        .fold(Duration::new(0, 0), |latency, &measurement| {
+            latency + measurement
+        })
+        / ((measurements.len() as u32) * 2);
 
-    (bits / seconds) * 1_000_000.0
+    latency
 }
 
-fn download(bytes: i64) -> () {
-    let client = reqwest::Client::new();
+async fn measure_jitter(measurements: &Vec<Duration>) -> u128 {
+    let jitters: Vec<u128> = measurements
+        .windows(2)
+        .map(|pair| pair[0].abs_diff(pair[1]).as_millis())
+        .collect();
+
+    jitters.iter().sum::<u128>() / jitters.len() as u128
+}
+
+async fn download_measurements(client: &Client) -> Vec<Duration> {
+    let mut measurements = vec![];
+
+    for _ in 0..20 {
+        let start = Instant::now();
+        let _ = client.send(Download { bytes: 0 }).await;
+        let measurement = Instant::now().duration_since(start);
+
+        measurements.push(measurement);
+    }
+
+    measurements
 }

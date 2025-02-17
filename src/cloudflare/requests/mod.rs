@@ -1,21 +1,40 @@
 extern crate serde;
 
+pub mod download;
 pub mod locations;
 pub mod trace;
+pub mod upload;
 
 use reqwest::{
     header::{HeaderMap, USER_AGENT},
-    Method,
+    Body, Method,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const NAME: &str = env!("CARGO_PKG_NAME");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+pub const UA: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CARGO_PKG_REPOSITORY"),
+    ")"
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RequestBody<T> {
+    None,
+    Text(T),
+}
+
+impl<T> Default for RequestBody<T> {
+    fn default() -> Self {
+        RequestBody::None
+    }
+}
 
 pub trait Request {
-    type Body: Serialize;
+    type Body: Into<Body>;
 
     type Response: for<'de> Deserialize<'de>;
 
@@ -26,12 +45,13 @@ pub trait Request {
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
 
-        headers.insert(
-            USER_AGENT,
-            format!("{}/{} ({})", NAME, VERSION, REPO).parse().unwrap(),
-        );
+        headers.insert(USER_AGENT, UA.parse().unwrap());
 
         headers
+    }
+
+    fn body(&self) -> RequestBody<Self::Body> {
+        Default::default()
     }
 }
 
@@ -48,6 +68,10 @@ impl<R: Request> Request for &R {
     fn headers(&self) -> HeaderMap {
         (**self).headers()
     }
+
+    fn body(&self) -> RequestBody<Self::Body> {
+        (**self).body()
+    }
 }
 
 impl<R: Request> Request for &mut R {
@@ -62,5 +86,9 @@ impl<R: Request> Request for &mut R {
 
     fn headers(&self) -> HeaderMap {
         (**self).headers()
+    }
+
+    fn body(&self) -> RequestBody<Self::Body> {
+        (**self).body()
     }
 }

@@ -1,5 +1,6 @@
-use crate::cloudflare::requests::Request;
-use reqwest::{header, Client as ReqwestClient};
+use crate::cloudflare::requests::{Request, RequestBody};
+use reqwest::{header, Body, Client as ReqwestClient, RequestBuilder};
+use std::error::Error;
 
 static BASE_URL: &str = "https://speed.cloudflare.com";
 
@@ -27,6 +28,7 @@ impl Client {
             .client
             .request(R::METHOD, &url)
             .headers(request.headers())
+            .cloudflare_body(request.body())?
             .send()
             .await?
             .error_for_status()?;
@@ -49,5 +51,18 @@ impl Client {
 impl Default for Client {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+trait RequestBuilderExt: Sized {
+    fn cloudflare_body<T: Into<Body>>(self, body: RequestBody<T>) -> Result<Self, Box<dyn Error>>;
+}
+
+impl RequestBuilderExt for RequestBuilder {
+    fn cloudflare_body<T: Into<Body>>(self, body: RequestBody<T>) -> Result<Self, Box<dyn Error>> {
+        Ok(match body {
+            RequestBody::None => self,
+            RequestBody::Text(value) => self.body(value),
+        })
     }
 }
