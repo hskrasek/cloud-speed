@@ -9,17 +9,30 @@ use crate::cloudflare::requests::{
 };
 use crate::stats::{median, quartile};
 use clap::Parser;
+use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
+use log::{debug, info};
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::join;
 use tokio::time::Instant;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Cli {}
+struct Cli {
+    #[command(flatten)]
+    verbose: Verbosity,
+
+    #[arg(short, long, default_value_t = false)]
+    json: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = Arc::new(Mutex::new(io::stdout().lock()));
+    let mut stderr = io::stderr().lock();
+
     let _: Cli = Cli::parse();
 
     let client = Client::new();
@@ -30,23 +43,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let measurements = download_measurements(&client).await;
 
-    let latency = measure_latency(&measurements).await;
-    let jitter = measure_jitter(&measurements).await;
+    let (latency, jitter) = join!(
+        measure_latency(&measurements),
+        measure_jitter(&measurements)
+    );
 
-    println!(
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {} {}",
         "Server Location:".bold().white(),
         location.city.bright_blue(),
         format!("({})", trace.colo).bright_blue()
-    );
-    println!(
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {} {}",
         "Your IP:\t".bold().white(),
         trace.ip.bright_blue(),
         format!("({})", trace.loc).bright_blue()
-    );
-    println!("{} {}", "Latency:\t".bold().white(), format!("{} ms", latency.as_millis()).bright_red());
-    println!("{} {}", "Jitter:\t\t".bold().white(), format!("{} ms", jitter).bright_red());
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "Latency:\t".bold().white(),
+        format!("{} ms", latency.as_millis()).bright_red()
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "Jitter:\t\t".bold().white(),
+        format!("{} ms", jitter).bright_red()
+    )?;
 
     let (
         download_measurements_100kb,
@@ -62,31 +89,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         measure_download(&client, 1e+8 as usize, 1)
     );
 
-    println!(
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "100kB speed:\t".bold().white(),
         format!("{:.2} Mbps", median(&download_measurements_100kb)).yellow()
-    );
-    println!(
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "1MB speed:\t".bold().white(),
         format!("{:.2} MB", median(&download_measurements_1mb)).yellow()
-    );
-    println!(
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "10MB speed:\t".bold().white(),
         format!("{:.2} MB", median(&download_measurements_10mb)).yellow()
-    );
-    println!(
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "25MB speed:\t".bold().white(),
         format!("{:.2} MB", median(&download_measurements_25mb)).yellow()
-    );
-    println!(
+    )?;
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "100MB speed:\t".bold().white(),
         format!("{:.2} MB", median(&download_measurements_100mb)).yellow()
-    );
+    )?;
 
     let download_measurements: Vec<Duration> = vec![
         download_measurements_100kb.as_slice(),
@@ -97,11 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]
     .concat();
 
-    println!(
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "Download speed:\t".bold().white(),
         format!("{:.2} Mbps", quartile(&download_measurements, 0.9)).bright_cyan()
-    );
+    )?;
 
     let (upload_measurements_10kb, upload_measurements_100kb, upload_measurements_1mb) = join!(
         measure_upload(&client, 1e+4 as usize, 10),
@@ -116,11 +149,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]
     .concat();
 
-    println!(
+    writeln!(
+        stdout.lock().unwrap(),
         "{} {}",
         "Upload speed:\t".bold().white(),
         format!("{:.2} Mbps", quartile(&upload_measurements, 0.9)).bright_cyan()
-    );
+    )?;
 
     Ok(())
 }
