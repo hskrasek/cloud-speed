@@ -16,3 +16,4 @@ tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
 serde_plain = "1.0.2"
 const_format = "0.2.34"
 log = "0.4.22"
+colored = "3.0.0"

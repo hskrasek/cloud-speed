@@ -9,6 +9,7 @@ use crate::cloudflare::requests::{
 };
 use crate::stats::{median, quartile};
 use clap::Parser;
+use colored::Colorize;
 use std::time::Duration;
 use tokio::join;
 use tokio::time::Instant;
@@ -32,10 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let latency = measure_latency(&measurements).await;
     let jitter = measure_jitter(&measurements).await;
 
-    println!("Server Location: {} ({})", location.city, trace.colo);
-    println!("Your IP: {} ({})", trace.ip, trace.loc);
-    println!("Latency: {} ms", latency.as_millis());
-    println!("Jitter: {} ms", jitter);
+    println!("{} {} {}", "Server Location:".bold().white(), location.city.bright_blue(), format!("({})", trace.colo).bright_blue());
+    println!("{} {} {}", "Your IP:".bold().white(), trace.ip.bright_blue(), format!("({})", trace.loc).bright_blue());
+    println!("{} {} ms", "Latency:".bold().white(), latency.as_millis());
+    println!("{} {} ms", "Jitter:".bold().white(), jitter);
 
     let (
         download_measurements_100kb,
@@ -52,21 +53,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "100kB speed: {:.2} Mbps",
+        "{} {:.2} Mbps",
+        "100kB speed:".bold().white(),
         median(&download_measurements_100kb)
     );
-    println!("1MB speed: {:.2} Mbps", median(&download_measurements_1mb));
     println!(
-        "10MB speed: {:.2} Mbps",
+        "{} {:.2} Mbps",
+        "1MB speed:".bold().white(),
+        median(&download_measurements_1mb)
+    );
+    println!(
+        "{} {:.2} Mbps",
+        "10MB speed:".bold().white(),
         median(&download_measurements_10mb)
     );
     println!(
-        "25MB speed: {:.2} Mbps",
+        "{} {:.2} Mbps",
+        "25MB speed:".bold().white(),
         median(&download_measurements_25mb)
     );
-
     println!(
-        "100MB speed: {:.2} Mbps",
+        "{} {:.2} Mbps",
+        "100MB speed:".bold().white(),
         median(&download_measurements_100mb)
     );
 
@@ -80,8 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .concat();
 
     println!(
-        "Download speed: {:.2} Mbps",
-        quartile(&download_measurements, 0.9)
+        "{} {}",
+        "Download speed:".bold().white(),
+        format!("{:.2} Mbps", quartile(&download_measurements, 0.9)).bright_cyan()
     );
 
     let (upload_measurements_10kb, upload_measurements_100kb, upload_measurements_1mb) = join!(
@@ -98,8 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .concat();
 
     println!(
-        "Upload speed: {:.2} Mbps",
-        quartile(&upload_measurements, 0.9)
+        "{} {}",
+        "Upload speed:".bold().white(),
+        format!("{:.2} Mbps", quartile(&upload_measurements, 0.9)).bright_cyan()
     );
 
     Ok(())
