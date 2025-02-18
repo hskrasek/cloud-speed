@@ -33,8 +33,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let latency = measure_latency(&measurements).await;
     let jitter = measure_jitter(&measurements).await;
 
-    println!("{} {} {}", "Server Location:".bold().white(), location.city.bright_blue(), format!("({})", trace.colo).bright_blue());
-    println!("{} {} {}", "Your IP:".bold().white(), trace.ip.bright_blue(), format!("({})", trace.loc).bright_blue());
+    println!(
+        "{} {} {}",
+        "Server Location:".bold().white(),
+        location.city.bright_blue(),
+        format!("({})", trace.colo).bright_blue()
+    );
+    println!(
+        "{} {} {}",
+        "Your IP:".bold().white(),
+        trace.ip.bright_blue(),
+        format!("({})", trace.loc).bright_blue()
+    );
     println!("{} {} ms", "Latency:".bold().white(), latency.as_millis());
     println!("{} {} ms", "Jitter:".bold().white(), jitter);
 
