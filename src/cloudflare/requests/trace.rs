@@ -2,13 +2,13 @@ extern crate serde;
 
 use crate::cloudflare::requests::Request;
 use serde::de::{Error, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
 use std::fmt::Formatter;
 use structmap::FromMap;
 use structmap_derive::FromMap;
 
-#[derive(FromMap, Debug)]
+#[derive(FromMap, Debug, Serialize)]
 pub(crate) struct Trace {
     fl: String,
     h: String,
