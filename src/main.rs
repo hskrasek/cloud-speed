@@ -41,12 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "{} {} {}",
-        "Your IP:".bold().white(),
+        "Your IP:\t".bold().white(),
         trace.ip.bright_blue(),
         format!("({})", trace.loc).bright_blue()
     );
-    println!("{} {} ms", "Latency:".bold().white(), latency.as_millis());
-    println!("{} {} ms", "Jitter:".bold().white(), jitter);
+    println!("{} {}", "Latency:\t".bold().white(), format!("{} ms", latency.as_millis()).bright_red());
+    println!("{} {}", "Jitter:\t\t".bold().white(), format!("{} ms", jitter).bright_red());
 
     let (
         download_measurements_100kb,
@@ -63,29 +63,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "{} {:.2} Mbps",
-        "100kB speed:".bold().white(),
-        median(&download_measurements_100kb)
+        "{} {}",
+        "100kB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_100kb)).yellow()
     );
     println!(
-        "{} {:.2} Mbps",
-        "1MB speed:".bold().white(),
-        median(&download_measurements_1mb)
+        "{} {}",
+        "1MB speed:\t".bold().white(),
+        format!("{:.2} MB", median(&download_measurements_1mb)).yellow()
     );
     println!(
-        "{} {:.2} Mbps",
-        "10MB speed:".bold().white(),
-        median(&download_measurements_10mb)
+        "{} {}",
+        "10MB speed:\t".bold().white(),
+        format!("{:.2} MB", median(&download_measurements_10mb)).yellow()
     );
     println!(
-        "{} {:.2} Mbps",
-        "25MB speed:".bold().white(),
-        median(&download_measurements_25mb)
+        "{} {}",
+        "25MB speed:\t".bold().white(),
+        format!("{:.2} MB", median(&download_measurements_25mb)).yellow()
     );
     println!(
-        "{} {:.2} Mbps",
-        "100MB speed:".bold().white(),
-        median(&download_measurements_100mb)
+        "{} {}",
+        "100MB speed:\t".bold().white(),
+        format!("{:.2} MB", median(&download_measurements_100mb)).yellow()
     );
 
     let download_measurements: Vec<Duration> = vec![
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{} {}",
-        "Download speed:".bold().white(),
+        "Download speed:\t".bold().white(),
         format!("{:.2} Mbps", quartile(&download_measurements, 0.9)).bright_cyan()
     );
 
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{} {}",
-        "Upload speed:".bold().white(),
+        "Upload speed:\t".bold().white(),
         format!("{:.2} Mbps", quartile(&upload_measurements, 0.9)).bright_cyan()
     );
 

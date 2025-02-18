@@ -10,9 +10,6 @@ pub struct LocationsResponse(Vec<Location>);
 #[derive(Debug, Deserialize)]
 pub(crate) struct Location {
     pub iata: String,
-    pub lat: f64,
-    pub lon: f64,
-    pub region: String,
     pub city: String,
 }
 
