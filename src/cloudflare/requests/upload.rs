@@ -1,19 +1,9 @@
-// const data = "0".repeat(bytes);
-// const options = {
-//     headers: {
-//         "Content-Length": Buffer.byteLength(data),
-//     },
-// };
-//
-// return request(options, data);
-
 use crate::cloudflare::requests::{Request, RequestBody, UA};
 use reqwest::header::{HeaderMap, CONTENT_LENGTH, USER_AGENT};
 use reqwest::Method;
 use std::borrow::Cow;
 
 pub(crate) struct Upload {
-    pub bytes: usize,
     data: String,
 }
 
@@ -21,7 +11,7 @@ impl Upload {
     pub fn new(bytes: usize) -> Self {
         let body = "0".repeat(bytes);
 
-        Self { bytes, data: body }
+        Self { data: body }
     }
 }
 
