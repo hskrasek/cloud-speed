@@ -40,6 +40,8 @@ struct SpeedTestResults<'a> {
     timestamp: DateTime<Utc>,
     trace: &'a Trace,
     location: &'a Location,
+    latency: u128,
+    jitter: u128,
     download_results: DownloadResults,
     download_speed: f64,
     upload_speed: f64,
@@ -62,9 +64,13 @@ struct DownloadResults {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = Arc::new(Mutex::new(io::stdout().lock()));
-    let mut stderr = io::stderr().lock();
+    let mut _stderr = io::stderr().lock();
 
     let cli: Cli = Cli::parse();
+
+    env_logger::Builder::new()
+        .filter_level(cli.verbose.log_level_filter())
+        .init();
 
     let client = Client::new();
 
@@ -151,6 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timestamp: Utc::now(),
         trace: &trace,
         location: &location,
+        latency: latency.as_millis(),
+        jitter,
         download_results: DownloadResults {
             _100kb: median(&download_measurements_100kb),
             _1mb: median(&download_measurements_1mb),
@@ -173,25 +181,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             stdout.lock().unwrap(),
             "{} {}",
             "1MB speed:\t".bold().white(),
-            format!("{:.2} MB", median(&download_measurements_1mb)).yellow()
+            format!("{:.2} Mbps", median(&download_measurements_1mb)).yellow()
         )?;
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "10MB speed:\t".bold().white(),
-            format!("{:.2} MB", median(&download_measurements_10mb)).yellow()
+            format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
         )?;
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "25MB speed:\t".bold().white(),
-            format!("{:.2} MB", median(&download_measurements_25mb)).yellow()
+            format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
         )?;
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "100MB speed:\t".bold().white(),
-            format!("{:.2} MB", median(&download_measurements_100mb)).yellow()
+            format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
         )?;
         writeln!(
             stdout.lock().unwrap(),
@@ -234,7 +242,8 @@ async fn measure_latency(measurements: &Vec<Duration>) -> Duration {
 async fn measure_jitter(measurements: &Vec<Duration>) -> u128 {
     let jitters: Vec<u128> = measurements
         .windows(2)
-        .map(|pair| pair[0].abs_diff(pair[1]).as_millis())
+        .map(|pair| pair[0].abs_diff(pair[1]))
+        .map(|duration| duration.as_millis())
         .collect();
 
     jitters.iter().sum::<u128>() / jitters.len() as u128
@@ -243,10 +252,14 @@ async fn measure_jitter(measurements: &Vec<Duration>) -> u128 {
 async fn download_measurements(client: &Client) -> Vec<Duration> {
     let mut measurements = vec![];
 
+    // Execute 20 requests async
     for _ in 0..20 {
         let start = Instant::now();
-        let _ = client.send(Download { bytes: 0 }).await;
+        let result = client.send(Download { bytes: 0 }).await;
+        let _ = result.unwrap().bytes().last();
         let measurement = Instant::now().duration_since(start);
+
+        info!("Trip calculated to {} ms", measurement.as_millis());
 
         measurements.push(measurement);
     }
