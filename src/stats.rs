@@ -11,10 +11,7 @@ pub fn median(test_durations: &Vec<Duration>) -> f64 {
     let mid = test_durations_u128.len() / 2;
 
     if test_durations_u128.len() % 2 == 0 {
-        mean(&vec![
-            test_durations_u128[mid - 1],
-            test_durations_u128[mid],
-        ])
+        mean(&vec![test_durations_u128[mid - 1], test_durations_u128[mid]])
     } else {
         test_durations_u128[mid] as f64
     }

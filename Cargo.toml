@@ -3,35 +3,67 @@ name = "cloud-speed"
 version = "0.5.0"
 edition = "2021"
 authors = ["Hunter Skrasek"]
+description = """
+cloud-speed is a tool for testing your networks speed and consistency.
+"""
+documentation = "https://github.com/hskrasek/cloud-speed"
+homepage = "https://github.com/hskrasek/cloud-speed"
 repository = "https://github.com/hskrasek/cloud-speed"
-license = "MIT OR AGPL-3"
+license = "AGPL-3"
+readme = "README.md"
+keywords = ["cloud-speed", "cloudflare"]
+categories = ["command-line-utilities"]
+rust-version = "1.85.0"
 
 [dependencies]
-clap = { version = "4.5.21", features = ["derive"] }
+chrono = { version = "0.4.39", features = ["serde"] }
+clap-verbosity-flag = "3.0.2"
+colored = "3.0.0"
+env_logger = "0.11.6"
+log = "0.4.22"
 reqwest = { version = "0.12.9", features = ["json"] }
 serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+serde_plain = "1.0.2"
 structmap = "0.1.6"
 structmap-derive = "0.1.6"
 tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
-serde_plain = "1.0.2"
-log = "0.4.22"
+
+[dependencies.clap]
+version = "4.5.21"
+default-features = false
+features = ["derive", "suggestions"]
+
+[build-dependencies]
 colored = "3.0.0"
-clap-verbosity-flag = "3.0.2"
-serde_json = "1.0.133"
-chrono = { version = "0.4.39", features = ["serde"] }
-env_logger = "0.11.6"
+reqwest = { version = "0.12.9", features = ["json"] }
+serde = { version = "1.0.215", features = ["derive"] }
+serde_plain = "1.0.2"
+
+[build-dependencies.clap]
+version = "4.5.21"
+default-features = false
+features = ["derive", "suggestions", "std"]
+
+[[bin]]
+bench = false
+path = "src/main.rs"
+name = "cloud-speed"
 
 [profile.dev]
 opt-level = 0  # Keep it 0 for faster build times during development
 
 [profile.release]
-opt-level = "s"  # Optimize for size. Use "s" if you prefer speed over size.
-lto = true  # Enable Link Time Optimization
-codegen-units = 1  # Better optimization at the cost of longer compile time
-debug = 0  # Do not include debug symbols
+debug = 1
 
-[build]
-target = ["aarch64-apple-darwin"]
-
-[target.aarch64-apple-darwin]
-rustflags = ["-C", "target-cpu=native"]
+[profile.release-lto]
+inherits = "release"
+opt-level = 3
+debug = "none"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = "fat"
+panic = "abort"
+incremental = false
+codegen-units = 1

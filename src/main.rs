@@ -7,7 +7,8 @@ use crate::cloudflare::client::Client;
 use crate::cloudflare::requests::locations::Location;
 use crate::cloudflare::requests::trace::Trace;
 use crate::cloudflare::requests::{
-    download::Download, locations::Locations, trace::TraceRequest, upload::Upload,
+    download::Download, locations::Locations, trace::TraceRequest,
+    upload::Upload,
 };
 use crate::stats::{median, quartile};
 use chrono::{DateTime, Utc};
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             location.city.bright_blue(),
             format!("({})", trace.colo).bright_blue()
         )?;
+
         writeln!(
             stdout.lock().unwrap(),
             "{} {} {}",
@@ -97,10 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let measurements = download_measurements(&client).await;
 
-    let (latency, jitter) = join!(
-        measure_latency(&measurements),
-        measure_jitter(&measurements)
-    );
+    let (latency, jitter) =
+        join!(measure_latency(&measurements), measure_jitter(&measurements));
 
     if !cli.json {
         writeln!(
@@ -140,7 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]
     .concat();
 
-    let (upload_measurements_10kb, upload_measurements_100kb, upload_measurements_1mb) = join!(
+    let (
+        upload_measurements_10kb,
+        upload_measurements_100kb,
+        upload_measurements_1mb,
+    ) = join!(
         measure_upload(&client, 1e+4 as usize, 10),
         measure_upload(&client, 1e+5 as usize, 10),
         measure_upload(&client, 1e+6 as usize, 8)
@@ -170,50 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         upload_speed: quartile(&upload_measurements, 0.9),
     };
 
-    if !cli.json {
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "100kB speed:\t".bold().white(),
-            format!("{:.2} Mbps", median(&download_measurements_100kb)).yellow()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "1MB speed:\t".bold().white(),
-            format!("{:.2} Mbps", median(&download_measurements_1mb)).yellow()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "10MB speed:\t".bold().white(),
-            format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "25MB speed:\t".bold().white(),
-            format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "100MB speed:\t".bold().white(),
-            format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "Download speed:\t".bold().white(),
-            format!("{:.2} Mbps", quartile(&download_measurements, 0.9)).bright_cyan()
-        )?;
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "Upload speed:\t".bold().white(),
-            format!("{:.2} Mbps", quartile(&upload_measurements, 0.9)).bright_cyan()
-        )?;
-    } else {
+    if cli.json {
         writeln!(
             stdout.lock().unwrap(),
             "{}",
@@ -222,8 +183,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 serde_json::to_string_pretty(&results)?
             }
-        )?
+        )?;
+
+        return Ok(());
     }
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "100kB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_100kb)).yellow()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "1MB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_1mb)).yellow()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "10MB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "25MB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "100MB speed:\t".bold().white(),
+        format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "Download speed:\t".bold().white(),
+        format!("{:.2} Mbps", quartile(&download_measurements, 0.9))
+            .bright_cyan()
+    )?;
+
+    writeln!(
+        stdout.lock().unwrap(),
+        "{} {}",
+        "Upload speed:\t".bold().white(),
+        format!("{:.2} Mbps", quartile(&upload_measurements, 0.9))
+            .bright_cyan()
+    )?;
 
     Ok(())
 }
@@ -267,7 +281,11 @@ async fn download_measurements(client: &Client) -> Vec<Duration> {
     measurements
 }
 
-async fn measure_download(client: &Client, bytes: usize, iterations: usize) -> Vec<Duration> {
+async fn measure_download(
+    client: &Client,
+    bytes: usize,
+    iterations: usize,
+) -> Vec<Duration> {
     let mut downloads = vec![];
     let download_request = Download { bytes };
 
@@ -281,7 +299,11 @@ async fn measure_download(client: &Client, bytes: usize, iterations: usize) -> V
     downloads
 }
 
-async fn measure_upload(client: &Client, bytes: usize, iterations: usize) -> Vec<Duration> {
+async fn measure_upload(
+    client: &Client,
+    bytes: usize,
+    iterations: usize,
+) -> Vec<Duration> {
     let mut uploads = vec![];
     let upload_request = Upload::new(bytes);
 

@@ -1,5 +1,7 @@
 use crate::cloudflare::requests::{Request, UA};
-use reqwest::header::{HeaderMap, HeaderValue, CACHE_CONTROL, CONNECTION, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderValue, CACHE_CONTROL, CONNECTION, USER_AGENT,
+};
 use std::borrow::Cow;
 
 #[derive(Copy, Clone)]

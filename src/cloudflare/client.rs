@@ -11,9 +11,7 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Self {
-        Client {
-            client: ReqwestClient::new(),
-        }
+        Client { client: ReqwestClient::new() }
     }
 
     pub async fn send<R: Request>(
@@ -36,7 +34,10 @@ impl Client {
         if let Some(ct_value) = response.headers().get(header::CONTENT_TYPE) {
             if let Ok(content_type) = ct_value.to_str() {
                 if content_type.starts_with("application/json") {
-                    return response.json::<R::Response>().await.map_err(Into::into);
+                    return response
+                        .json::<R::Response>()
+                        .await
+                        .map_err(Into::into);
                 }
             }
         }
@@ -55,11 +56,17 @@ impl Default for Client {
 }
 
 trait RequestBuilderExt: Sized {
-    fn cloudflare_body<T: Into<Body>>(self, body: RequestBody<T>) -> Result<Self, Box<dyn Error>>;
+    fn cloudflare_body<T: Into<Body>>(
+        self,
+        body: RequestBody<T>,
+    ) -> Result<Self, Box<dyn Error>>;
 }
 
 impl RequestBuilderExt for RequestBuilder {
-    fn cloudflare_body<T: Into<Body>>(self, body: RequestBody<T>) -> Result<Self, Box<dyn Error>> {
+    fn cloudflare_body<T: Into<Body>>(
+        self,
+        body: RequestBody<T>,
+    ) -> Result<Self, Box<dyn Error>> {
         Ok(match body {
             RequestBody::None => self,
             RequestBody::Text(value) => self.body(value),
