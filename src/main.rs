@@ -23,17 +23,27 @@ use std::time::Duration;
 use tokio::join;
 use tokio::time::Instant;
 
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[command(flatten)]
-    verbose: Verbosity,
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CLOUDSPEED_BUILD_GIT_HASH"),
+    ")"
+);
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None, long_version = LONG_VERSION)]
+struct Cli {
+    /// Print results in json format
     #[arg(short, long, default_value_t = false)]
     json: bool,
 
+    /// Only applies when json is active.
+    /// Pretty prints JSON on output
     #[arg(short, long, default_value_t = false)]
     pretty: bool,
+
+    #[command(flatten)]
+    verbose: Verbosity,
 }
 
 #[derive(Serialize)]

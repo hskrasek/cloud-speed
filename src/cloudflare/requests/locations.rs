@@ -10,12 +10,12 @@ pub struct LocationsResponse(Vec<Location>);
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct Location {
     pub iata: String,
-    #[serde(rename(serialize = "lat"))]
+    #[serde(rename(serialize = "lat", deserialize = "lat"))]
     pub _lat: f64,
-    #[serde(rename(serialize = "lon"))]
+    #[serde(rename(serialize = "lon", deserialize = "lon"))]
     pub _lon: f64,
     pub city: String,
-    #[serde(rename(serialize = "region"))]
+    #[serde(rename(serialize = "region", deserialize = "region"))]
     pub _region: String,
 }
 
