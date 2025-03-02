@@ -1,6 +1,7 @@
 extern crate clap;
 
 mod cloudflare;
+mod measurements;
 mod stats;
 
 use crate::cloudflare::client::Client;
@@ -10,6 +11,7 @@ use crate::cloudflare::requests::{
     meta::{Meta, MetaRequest},
     upload::Upload,
 };
+use crate::measurements::{jitter, latency};
 use crate::stats::{median, quartile};
 use chrono::{DateTime, Utc};
 use clap::Parser;
@@ -115,23 +117,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    let measurements = download_measurements(&client).await;
+    let (measurements, new_measurements) =
+        join!(download_measurements(&client), latency_measurements(&client),);
 
-    let (latency, jitter) =
-        join!(measure_latency(&measurements), measure_jitter(&measurements));
+    let (latency, jitter, new_latency, new_jitter) = join!(
+        latency(&measurements),
+        jitter(&measurements),
+        latency(&new_measurements),
+        jitter(&new_measurements),
+    );
+
+    info!(
+        "Existing Latency: {} ms\tNew Latency: {} ms",
+        latency.as_millis(),
+        new_latency.as_millis()
+    );
+    info!("Existing Jitter: {} ms\t\tNew Jitter: {} ms", jitter, new_jitter);
 
     if !cli.json {
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "Latency:\t".bold().white(),
-            format!("{} ms", latency.as_millis()).bright_red()
+            format!("{} ms", new_latency.as_millis()).bright_red()
         )?;
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "Jitter:\t\t".bold().white(),
-            format!("{} ms", jitter).bright_red()
+            format!("{} ms", new_jitter).bright_red()
         )?;
     }
 
@@ -266,38 +280,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn measure_latency(measurements: &Vec<Duration>) -> Duration {
-    let latency = measurements
-        .iter()
-        .fold(Duration::new(0, 0), |latency, &measurement| {
-            latency + measurement
-        })
-        / ((measurements.len() as u32) * 2);
+async fn latency_measurements(client: &Client) -> Vec<Duration> {
+    let mut measurements: Vec<Duration> = vec![];
 
-    latency
-}
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client.send(Download { bytes: 0 }).await;
+        let measurement = start.elapsed();
 
-async fn measure_jitter(measurements: &Vec<Duration>) -> u128 {
-    let jitters: Vec<u128> = measurements
-        .windows(2)
-        .map(|pair| pair[0].abs_diff(pair[1]))
-        .map(|duration| duration.as_millis())
-        .collect();
+        info!("Latency Measurement: {} ms", measurement.as_millis());
 
-    jitters.iter().sum::<u128>() / jitters.len() as u128
+        measurements.push(measurement);
+    }
+
+    measurements
 }
 
 async fn download_measurements(client: &Client) -> Vec<Duration> {
     let mut measurements = vec![];
 
-    // Execute 20 requests async
     for _ in 0..20 {
         let start = Instant::now();
         let result = client.send(Download { bytes: 0 }).await;
         let _ = result.unwrap().bytes().last();
         let measurement = Instant::now().duration_since(start);
 
-        info!("Trip calculated to {} ms", measurement.as_millis());
+        debug!("Trip calculated to {} ms", measurement.as_millis());
 
         measurements.push(measurement);
     }
