@@ -4,10 +4,10 @@ mod cloudflare;
 mod stats;
 
 use crate::cloudflare::client::Client;
-use crate::cloudflare::requests::locations::Location;
-use crate::cloudflare::requests::trace::Trace;
 use crate::cloudflare::requests::{
-    download::Download, locations::Locations, trace::TraceRequest,
+    download::Download,
+    locations::{Location, Locations},
+    meta::{Meta, MetaRequest},
     upload::Upload,
 };
 use crate::stats::{median, quartile};
@@ -49,7 +49,7 @@ struct Cli {
 #[derive(Serialize)]
 struct SpeedTestResults<'a> {
     timestamp: DateTime<Utc>,
-    trace: &'a Trace,
+    meta: &'a Meta,
     location: &'a Location,
     latency: u128,
     jitter: u128,
@@ -85,9 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new();
 
-    let trace = client.send(TraceRequest {}).await?;
+    let meta = client.send(MetaRequest {}).await?;
 
-    let location = client.send(Locations {}).await?.get(&trace.colo);
+    let location = client.send(Locations {}).await?.get(&meta.colo);
 
     if !cli.json {
         writeln!(
@@ -95,15 +95,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{} {} {}",
             "Server Location:".bold().white(),
             location.city.bright_blue(),
-            format!("({})", trace.colo).bright_blue()
+            format!("({})", meta.colo).bright_blue()
+        )?;
+
+        writeln!(
+            stdout.lock().unwrap(),
+            "{} {} {}",
+            "Your network:\t".bold().white(),
+            meta.as_organization.bright_blue(),
+            format!("(AS{})", meta.asn).bright_blue()
         )?;
 
         writeln!(
             stdout.lock().unwrap(),
             "{} {} {}",
             "Your IP:\t".bold().white(),
-            trace.ip.bright_blue(),
-            format!("({})", trace.loc).bright_blue()
+            meta.client_ip.bright_blue(),
+            format!("({})", meta.country).bright_blue()
         )?;
     }
 
@@ -138,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         measure_download(&client, 1e+6 as usize, 8),
         measure_download(&client, 1e+7 as usize, 6),
         measure_download(&client, 2.5e+7 as usize, 4),
-        measure_download(&client, 1e+8 as usize, 1)
+        measure_download(&client, 1e+8 as usize, 3)
     );
 
     let download_measurements: Vec<Duration> = vec![
@@ -151,25 +159,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .concat();
 
     let (
-        upload_measurements_10kb,
         upload_measurements_100kb,
         upload_measurements_1mb,
+        upload_measurements_10mb,
+        upload_measurements_25mb,
+        upload_measurements_50mb,
     ) = join!(
-        measure_upload(&client, 1e+4 as usize, 10),
-        measure_upload(&client, 1e+5 as usize, 10),
-        measure_upload(&client, 1e+6 as usize, 8)
+        measure_upload(&client, 1e+5 as usize, 8),
+        measure_upload(&client, 1e+6 as usize, 6),
+        measure_upload(&client, 1e+7 as usize, 4),
+        measure_upload(&client, 2.5e+7 as usize, 4),
+        measure_upload(&client, 5e+7 as usize, 3)
     );
 
     let upload_measurements: Vec<Duration> = vec![
-        upload_measurements_10kb.as_slice(),
         upload_measurements_100kb.as_slice(),
         upload_measurements_1mb.as_slice(),
+        upload_measurements_10mb.as_slice(),
+        upload_measurements_25mb.as_slice(),
+        upload_measurements_50mb.as_slice(),
     ]
     .concat();
 
     let results = SpeedTestResults {
         timestamp: Utc::now(),
-        trace: &trace,
+        meta: &meta,
         location: &location,
         latency: latency.as_millis(),
         jitter,
@@ -301,8 +315,14 @@ async fn measure_download(
 
     for _ in 0..iterations {
         let start = Instant::now();
+        debug!("Starting download {:#?}", start);
         let _ = client.send(download_request).await;
-        let measurement = Instant::now().duration_since(start);
+        let finish = Instant::now();
+        debug!("Finished download {:#?}", finish);
+        let measurement = finish.duration_since(start);
+
+        info!("Trip calculated to {} ms", measurement.as_millis());
+
         downloads.push(measurement);
     }
 

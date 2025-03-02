@@ -2,7 +2,7 @@ extern crate serde;
 
 pub mod download;
 pub mod locations;
-pub mod trace;
+pub mod meta;
 pub mod upload;
 
 use reqwest::{
