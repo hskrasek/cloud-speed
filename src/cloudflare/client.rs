@@ -17,7 +17,7 @@ impl Client {
     pub async fn send<R: Request>(
         &self,
         request: R,
-    ) -> Result<R::Response, Box<dyn std::error::Error>> {
+    ) -> Result<R::Response, Box<dyn Error>> {
         let endpoint = request.endpoint();
         let endpoint = endpoint.trim_matches('/');
         let url = format!("{}/{}", BASE_URL, endpoint);

@@ -6,17 +6,19 @@ mod stats;
 
 use crate::cloudflare::client::Client;
 use crate::cloudflare::requests::{
-    download::Download,
     locations::{Location, Locations},
     meta::{Meta, MetaRequest},
     upload::Upload,
 };
-use crate::measurements::{jitter, latency};
-use crate::stats::{median, quartile};
+use crate::cloudflare::tests::download::Download as DownloadTest;
+use crate::cloudflare::tests::{Test, TestResults};
+use crate::measurements::{jitter, jitter_f64, latency, latency_f64};
+use crate::stats::{median, median_f64, quartile};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
+use futures::future::join_all;
 use log::{debug, info};
 use serde::Serialize;
 use std::io::{self, Write};
@@ -25,7 +27,7 @@ use std::time::Duration;
 use tokio::join;
 use tokio::time::Instant;
 
-pub const LONG_VERSION: &str = concat!(
+const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
     env!("CLOUDSPEED_BUILD_GIT_HASH"),
@@ -117,224 +119,231 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    let (measurements, new_measurements) =
-        join!(download_measurements(&client), latency_measurements(&client),);
+    let measurements = latency_measurements().await;
 
-    let (latency, jitter, new_latency, new_jitter) = join!(
-        latency(&measurements),
-        jitter(&measurements),
-        latency(&new_measurements),
-        jitter(&new_measurements),
-    );
-
-    info!(
-        "Existing Latency: {} ms\tNew Latency: {} ms",
-        latency.as_millis(),
-        new_latency.as_millis()
-    );
-    info!("Existing Jitter: {} ms\t\tNew Jitter: {} ms", jitter, new_jitter);
+    let (latency, jitter) =
+        join!(latency_f64(&measurements), jitter_f64(&measurements));
 
     if !cli.json {
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "Latency:\t".bold().white(),
-            format!("{} ms", new_latency.as_millis()).bright_red()
+            format!("{:.2} ms", latency).bright_red()
         )?;
+
         writeln!(
             stdout.lock().unwrap(),
             "{} {}",
             "Jitter:\t\t".bold().white(),
-            format!("{} ms", new_jitter).bright_red()
+            format!("{:.2} ms", jitter).bright_red()
         )?;
     }
 
     let (
-        download_measurements_100kb,
-        download_measurements_1mb,
-        download_measurements_10mb,
-        download_measurements_25mb,
-        download_measurements_100mb,
+        mut download_measurements_100kb,
+        mut download_measurements_1mb,
+        // download_measurements_10mb,
+        // download_measurements_25mb,
+        // download_measurements_100mb,
     ) = join!(
-        measure_download(&client, 1e+5 as usize, 10),
-        measure_download(&client, 1e+6 as usize, 8),
-        measure_download(&client, 1e+7 as usize, 6),
-        measure_download(&client, 2.5e+7 as usize, 4),
-        measure_download(&client, 1e+8 as usize, 3)
+        measure_download(100_000, 10),
+        measure_download(1_000_000, 8),
+        // measure_download(10_000_000, 6),
+        // measure_download(25_000_000, 4),
+        // measure_download(100_000_000, 3)
     );
 
-    let download_measurements: Vec<Duration> = vec![
-        download_measurements_100kb.as_slice(),
-        download_measurements_1mb.as_slice(),
-        download_measurements_10mb.as_slice(),
-        download_measurements_25mb.as_slice(),
-        download_measurements_100mb.as_slice(),
-    ]
-    .concat();
+    // let download_measurements: Vec<Duration> = vec![
+    //     download_measurements_100kb.as_slice(),
+    //     download_measurements_1mb.as_slice(),
+    //     download_measurements_10mb.as_slice(),
+    //     download_measurements_25mb.as_slice(),
+    //     download_measurements_100mb.as_slice(),
+    // ]
+    // .concat();
 
-    let (
-        upload_measurements_100kb,
-        upload_measurements_1mb,
-        upload_measurements_10mb,
-        upload_measurements_25mb,
-        upload_measurements_50mb,
-    ) = join!(
-        measure_upload(&client, 1e+5 as usize, 8),
-        measure_upload(&client, 1e+6 as usize, 6),
-        measure_upload(&client, 1e+7 as usize, 4),
-        measure_upload(&client, 2.5e+7 as usize, 4),
-        measure_upload(&client, 5e+7 as usize, 3)
-    );
+    // let (
+    //     upload_measurements_100kb,
+    //     upload_measurements_1mb,
+    //     upload_measurements_10mb,
+    //     upload_measurements_25mb,
+    //     upload_measurements_50mb,
+    // ) = join!(
+    //     measure_upload(&client, 1e+5 as usize, 8),
+    //     measure_upload(&client, 1e+6 as usize, 6),
+    //     measure_upload(&client, 1e+7 as usize, 4),
+    //     measure_upload(&client, 2.5e+7 as usize, 4),
+    //     measure_upload(&client, 5e+7 as usize, 3)
+    // );
+    //
+    // let upload_measurements: Vec<Duration> = vec![
+    //     upload_measurements_100kb.as_slice(),
+    //     upload_measurements_1mb.as_slice(),
+    //     upload_measurements_10mb.as_slice(),
+    //     upload_measurements_25mb.as_slice(),
+    //     upload_measurements_50mb.as_slice(),
+    // ]
+    // .concat();
 
-    let upload_measurements: Vec<Duration> = vec![
-        upload_measurements_100kb.as_slice(),
-        upload_measurements_1mb.as_slice(),
-        upload_measurements_10mb.as_slice(),
-        upload_measurements_25mb.as_slice(),
-        upload_measurements_50mb.as_slice(),
-    ]
-    .concat();
-
-    let results = SpeedTestResults {
-        timestamp: Utc::now(),
-        meta: &meta,
-        location: &location,
-        latency: latency.as_millis(),
-        jitter,
-        download_results: DownloadResults {
-            _100kb: median(&download_measurements_100kb),
-            _1mb: median(&download_measurements_1mb),
-            _10mb: median(&download_measurements_10mb),
-            _25mb: median(&download_measurements_25mb),
-            _100mb: median(&download_measurements_100mb),
-        },
-        download_speed: quartile(&download_measurements, 0.9),
-        upload_speed: quartile(&upload_measurements, 0.9),
-    };
-
-    if cli.json {
-        writeln!(
-            stdout.lock().unwrap(),
-            "{}",
-            if !cli.pretty {
-                serde_json::to_string(&results)?
-            } else {
-                serde_json::to_string_pretty(&results)?
-            }
-        )?;
-
-        return Ok(());
-    }
-
+    // let results = SpeedTestResults {
+    //     timestamp: Utc::now(),
+    //     meta: &meta,
+    //     location: &location,
+    //     latency: latency.as_millis(),
+    //     jitter,
+    //     download_results: DownloadResults {
+    //         _100kb: median(&download_measurements_100kb),
+    //         _1mb: median(&download_measurements_1mb),
+    //         _10mb: median(&download_measurements_10mb),
+    //         _25mb: median(&download_measurements_25mb),
+    //         _100mb: median(&download_measurements_100mb),
+    //     },
+    //     download_speed: quartile(&download_measurements, 0.9),
+    //     upload_speed: quartile(&upload_measurements, 0.9),
+    // };
+    //
+    // if cli.json {
+    //     writeln!(
+    //         stdout.lock().unwrap(),
+    //         "{}",
+    //         if !cli.pretty {
+    //             serde_json::to_string(&results)?
+    //         } else {
+    //             serde_json::to_string_pretty(&results)?
+    //         }
+    //     )?;
+    //
+    //     return Ok(());
+    // }
+    dbg!(&download_measurements_100kb);
     writeln!(
         stdout.lock().unwrap(),
         "{} {}",
         "100kB speed:\t".bold().white(),
-        format!("{:.2} Mbps", median(&download_measurements_100kb)).yellow()
+        format!(
+            "{:.2} Mbps",
+            measure_speed(
+                100_000.0,
+                median_f64(&mut download_measurements_100kb).unwrap()
+            )
+        )
+        .yellow()
     )?;
-
+    dbg!(&download_measurements_1mb);
     writeln!(
         stdout.lock().unwrap(),
         "{} {}",
         "1MB speed:\t".bold().white(),
-        format!("{:.2} Mbps", median(&download_measurements_1mb)).yellow()
+        format!(
+            "{:.2} Mbps",
+            measure_speed(
+                1_000_000.0,
+                median_f64(&mut download_measurements_1mb).unwrap()
+            )
+        )
+        .yellow()
     )?;
 
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "10MB speed:\t".bold().white(),
-        format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
-    )?;
-
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "25MB speed:\t".bold().white(),
-        format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
-    )?;
-
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "100MB speed:\t".bold().white(),
-        format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
-    )?;
-
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "Download speed:\t".bold().white(),
-        format!("{:.2} Mbps", quartile(&download_measurements, 0.9))
-            .bright_cyan()
-    )?;
-
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "Upload speed:\t".bold().white(),
-        format!("{:.2} Mbps", quartile(&upload_measurements, 0.9))
-            .bright_cyan()
-    )?;
+    // writeln!(
+    //     stdout.lock().unwrap(),
+    //     "{} {}",
+    //     "10MB speed:\t".bold().white(),
+    //     format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
+    // )?;
+    //
+    // writeln!(
+    //     stdout.lock().unwrap(),
+    //     "{} {}",
+    //     "25MB speed:\t".bold().white(),
+    //     format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
+    // )?;
+    //
+    // writeln!(
+    //     stdout.lock().unwrap(),
+    //     "{} {}",
+    //     "100MB speed:\t".bold().white(),
+    //     format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
+    // )?;
+    //
+    // writeln!(
+    //     stdout.lock().unwrap(),
+    //     "{} {}",
+    //     "Download speed:\t".bold().white(),
+    //     format!("{:.2} Mbps", quartile(&download_measurements, 0.9))
+    //         .bright_cyan()
+    // )?;
+    //
+    // writeln!(
+    //     stdout.lock().unwrap(),
+    //     "{} {}",
+    //     "Upload speed:\t".bold().white(),
+    //     format!("{:.2} Mbps", quartile(&upload_measurements, 0.9))
+    //         .bright_cyan()
+    // )?;
 
     Ok(())
 }
 
-async fn latency_measurements(client: &Client) -> Vec<Duration> {
-    let mut measurements: Vec<Duration> = vec![];
+async fn latency_measurements() -> Vec<f64> {
+    let mut tests: Vec<_> = Vec::new();
 
     for _ in 0..10 {
-        let start = Instant::now();
-        let _ = client.send(Download { bytes: 0 }).await;
-        let measurement = start.elapsed();
-
-        info!("Latency Measurement: {} ms", measurement.as_millis());
-
-        measurements.push(measurement);
+        tests.push((DownloadTest {}).run(1000));
     }
 
-    measurements
+    let futures = tests.into_iter().map(|test| async move { test.await });
+
+    let results: Result<Vec<_>, _> =
+        join_all(futures).await.into_iter().collect();
+
+    let results = match results {
+        Ok(results) => results,
+        Err(error) => panic!("{:?}", error),
+    };
+
+    results
+        .into_iter()
+        .map(|result| {
+            let measurement = result.tcp_duration;
+
+            info!("Latency Measurement: {} ms", measurement.as_millis());
+
+            return measurement.as_secs_f64() * 1000.0;
+        })
+        .collect::<Vec<f64>>()
 }
 
-async fn download_measurements(client: &Client) -> Vec<Duration> {
-    let mut measurements = vec![];
+//          0           1       2               3           4       5       6
+// resolve([started, dnsLookup, tcpHandshake, sslHandshake, ttfb, ended, parseFloat(res.headers["server-timing"].slice(22))]);
+async fn measure_download(bytes: u64, iterations: usize) -> Vec<f64> {
+    let mut tests: Vec<_> = Vec::with_capacity(iterations);
 
-    for _ in 0..20 {
-        let start = Instant::now();
-        let result = client.send(Download { bytes: 0 }).await;
-        let _ = result.unwrap().bytes().last();
-        let measurement = Instant::now().duration_since(start);
-
-        debug!("Trip calculated to {} ms", measurement.as_millis());
-
-        measurements.push(measurement);
+    for _ in 0..tests.capacity() {
+        tests.push((DownloadTest {}).run(bytes));
     }
 
-    measurements
-}
+    let futures = tests.into_iter().map(|test| async move { test.await });
 
-async fn measure_download(
-    client: &Client,
-    bytes: usize,
-    iterations: usize,
-) -> Vec<Duration> {
-    let mut downloads = vec![];
-    let download_request = Download { bytes };
+    let results: Result<Vec<_>, _> =
+        join_all(futures).await.into_iter().collect();
 
-    for _ in 0..iterations {
-        let start = Instant::now();
-        debug!("Starting download {:#?}", start);
-        let _ = client.send(download_request).await;
-        let finish = Instant::now();
-        debug!("Finished download {:#?}", finish);
-        let measurement = finish.duration_since(start);
+    let results = match results {
+        Ok(results) => results,
+        Err(error) => panic!("{:?}", error),
+    };
 
-        info!("Trip calculated to {} ms", measurement.as_millis());
+    results
+        .into_iter()
+        .map(|result| {
+            info!("{:#?}", result);
+            let measurement = result.end_duration - result.ttfb_duration;
 
-        downloads.push(measurement);
-    }
+            info!("Download duration: {} ms", measurement.as_millis());
 
-    downloads
+            measurement.as_secs_f64() * 1000.0
+        })
+        .collect::<Vec<f64>>()
 }
 
 async fn measure_upload(
@@ -353,4 +362,8 @@ async fn measure_upload(
     }
 
     uploads
+}
+
+fn measure_speed(bytes: f64, duration: f64) -> f64 {
+    (bytes * 8.0) / (duration / 1000.0) / 1e6
 }

@@ -17,6 +17,34 @@ pub fn median(test_durations: &Vec<Duration>) -> f64 {
     }
 }
 
+pub fn median_f64(test_durations: &mut [f64]) -> Option<f64> {
+    let len = test_durations.len();
+
+    if len == 0 {
+        return None;
+    }
+
+    let mid = len / 2;
+
+    if len % 2 == 1 {
+        let (_, median, _) =
+            test_durations.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+
+        return Some(*median);
+    }
+
+    let (_, upper, _) =
+        test_durations.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    let upper_val = *upper;
+    let lower_val = test_durations[..mid]
+        .iter()
+        .copied()
+        .max_by(|a, b| a.total_cmp(b))
+        .unwrap();
+
+    Some((lower_val + upper_val) / 2.0)
+}
+
 pub fn mean(test_durations: &Vec<u128>) -> f64 {
     let sum = test_durations.iter().sum::<u128>();
 
