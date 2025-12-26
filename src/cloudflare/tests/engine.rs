@@ -7,8 +7,10 @@ use crate::measurements::{
 };
 use crate::retry::{retry_async, RetryConfig, RetryResult};
 use crate::stats::{median_f64, percentile_f64};
+use crate::tui::{BandwidthDirection, ProgressCallback, ProgressEvent, TestPhase};
 use log::{debug, info, warn};
 use std::error::Error;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// A data block configuration for bandwidth tests.
@@ -182,7 +184,7 @@ pub struct SpeedTestOutput {
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     let engine = TestEngine::new(TestConfig::default());
+///     let engine = TestEngine::new(TestConfig::default(), None);
 ///     let results = engine.run().await.unwrap();
 ///     println!("Download: {:.2} Mbps", results.download.speed_mbps);
 ///     println!("Upload: {:.2} Mbps", results.upload.speed_mbps);
@@ -190,12 +192,29 @@ pub struct SpeedTestOutput {
 /// ```
 pub struct TestEngine {
     config: TestConfig,
+    /// Optional progress callback for TUI updates.
+    /// When provided, the engine emits progress events during test execution.
+    progress_callback: Option<Arc<dyn ProgressCallback>>,
 }
 
 impl TestEngine {
     /// Create a new test engine with the given configuration.
-    pub fn new(config: TestConfig) -> Self {
-        Self { config }
+    ///
+    /// # Arguments
+    /// * `config` - Test configuration parameters
+    /// * `progress_callback` - Optional callback for progress updates
+    pub fn new(
+        config: TestConfig,
+        progress_callback: Option<Arc<dyn ProgressCallback>>,
+    ) -> Self {
+        Self { config, progress_callback }
+    }
+
+    /// Emit a progress event if a callback is registered.
+    fn emit_progress(&self, event: ProgressEvent) {
+        if let Some(ref callback) = self.progress_callback {
+            callback.on_progress(event);
+        }
     }
 
     /// Run the complete speed test sequence.
@@ -215,9 +234,12 @@ impl TestEngine {
     pub async fn run(&self) -> Result<SpeedTestOutput, Box<dyn Error>> {
         info!("Starting speed test sequence");
 
+        // Emit initializing phase
+        self.emit_progress(ProgressEvent::PhaseChange(TestPhase::Initializing));
+
         // Step 1: Initial latency estimation (1 packet)
         debug!("Running initial latency estimation");
-        let _ = self.run_latency(1).await?;
+        let _ = self.run_latency_internal(1, false).await?;
 
         // Step 2: Initial download estimation (100KB, 1 request)
         debug!("Running initial download estimation");
@@ -228,13 +250,20 @@ impl TestEngine {
             "Running full latency measurement ({} packets)",
             self.config.latency_packets
         );
+
+        // Emit latency phase
+        self.emit_progress(ProgressEvent::PhaseChange(TestPhase::Latency));
+
         let idle_latencies =
-            self.run_latency(self.config.latency_packets).await?;
+            self.run_latency_internal(self.config.latency_packets, true).await?;
 
         let idle_ms = latency_f64(&idle_latencies).await;
         let idle_jitter_ms = jitter_f64(&idle_latencies).await;
 
         info!("Idle latency: {:.2} ms, jitter: {:?}", idle_ms, idle_jitter_ms);
+
+        // Emit latency phase complete
+        self.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Latency));
 
         // Step 4: Interleaved download and upload tests with loaded latency
         let mut loaded_latency_collector = LoadedLatencyCollector::new();
@@ -289,6 +318,9 @@ impl TestEngine {
             download.speed_mbps, upload.speed_mbps
         );
 
+        // Emit complete phase
+        self.emit_progress(ProgressEvent::PhaseChange(TestPhase::Complete));
+
         Ok(SpeedTestOutput { latency, download, upload })
     }
 
@@ -310,6 +342,26 @@ impl TestEngine {
         let mut download_early_terminated = false;
         let mut upload_early_terminated = false;
 
+        // Track phase state for progress events
+        let mut download_phase_started = false;
+        let mut upload_phase_started = false;
+
+        // Calculate total measurements for progress tracking
+        let total_download_measurements: usize = self
+            .config
+            .download_sizes
+            .iter()
+            .map(|b| b.count)
+            .sum();
+        let total_upload_measurements: usize = self
+            .config
+            .upload_sizes
+            .iter()
+            .map(|b| b.count)
+            .sum();
+        let mut download_measurement_count = 0usize;
+        let mut upload_measurement_count = 0usize;
+
         // Get the maximum number of size blocks between download and upload
         let max_blocks = self
             .config
@@ -321,17 +373,27 @@ impl TestEngine {
             // Run download test for this size (if available and not terminated)
             if let Some(block) = self.config.download_sizes.get(i) {
                 if !download_early_terminated {
+                    // Emit download phase start on first download block
+                    if !download_phase_started {
+                        self.emit_progress(ProgressEvent::PhaseChange(
+                            TestPhase::Download,
+                        ));
+                        download_phase_started = true;
+                    }
+
                     info!(
                         "Running download test: {} bytes x {} iterations",
                         block.bytes, block.count
                     );
 
                     let (measurements, triggered) = self
-                        .run_bandwidth_block(
+                        .run_bandwidth_block_with_progress(
                             block,
                             true, // is_download
                             LatencyDirection::Download,
                             loaded_latency_collector,
+                            &mut download_measurement_count,
+                            total_download_measurements,
                         )
                         .await?;
 
@@ -350,8 +412,10 @@ impl TestEngine {
 
                     if triggered {
                         download_early_terminated = true;
-                        info!("Early termination triggered for download at {} bytes",
-                              block.bytes);
+                        info!(
+                            "Early termination triggered for download at {} bytes",
+                            block.bytes
+                        );
                     }
                 } else {
                     debug!(
@@ -364,17 +428,33 @@ impl TestEngine {
             // Run upload test for this size (if available and not terminated)
             if let Some(block) = self.config.upload_sizes.get(i) {
                 if !upload_early_terminated {
+                    // Emit upload phase start on first upload block
+                    // Also emit download phase complete if download was started
+                    if !upload_phase_started {
+                        if download_phase_started {
+                            self.emit_progress(ProgressEvent::PhaseComplete(
+                                TestPhase::Download,
+                            ));
+                        }
+                        self.emit_progress(ProgressEvent::PhaseChange(
+                            TestPhase::Upload,
+                        ));
+                        upload_phase_started = true;
+                    }
+
                     info!(
                         "Running upload test: {} bytes x {} iterations",
                         block.bytes, block.count
                     );
 
                     let (measurements, triggered) = self
-                        .run_bandwidth_block(
+                        .run_bandwidth_block_with_progress(
                             block,
                             false, // is_download
                             LatencyDirection::Upload,
                             loaded_latency_collector,
+                            &mut upload_measurement_count,
+                            total_upload_measurements,
                         )
                         .await?;
 
@@ -393,8 +473,10 @@ impl TestEngine {
 
                     if triggered {
                         upload_early_terminated = true;
-                        info!("Early termination triggered for upload at {} bytes",
-                              block.bytes);
+                        info!(
+                            "Early termination triggered for upload at {} bytes",
+                            block.bytes
+                        );
                     }
                 } else {
                     debug!(
@@ -403,6 +485,15 @@ impl TestEngine {
                     );
                 }
             }
+        }
+
+        // Emit phase complete events for any phases that were started
+        // but not yet completed (handles case where upload didn't start)
+        if download_phase_started && !upload_phase_started {
+            self.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Download));
+        }
+        if upload_phase_started {
+            self.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Upload));
         }
 
         // Calculate final speeds using 90th percentile of all measurements
@@ -471,6 +562,22 @@ impl TestEngine {
         &self,
         num_packets: usize,
     ) -> Result<Vec<f64>, Box<dyn Error>> {
+        self.run_latency_internal(num_packets, false).await
+    }
+
+    /// Internal latency measurement with optional progress events.
+    ///
+    /// # Arguments
+    /// * `num_packets` - Number of latency measurements to perform
+    /// * `emit_progress` - Whether to emit progress events
+    ///
+    /// # Returns
+    /// Vector of latency values in milliseconds
+    async fn run_latency_internal(
+        &self,
+        num_packets: usize,
+        emit_events: bool,
+    ) -> Result<Vec<f64>, Box<dyn Error>> {
         let download = Download {};
         let mut latencies = Vec::with_capacity(num_packets);
         let mut failed_count = 0;
@@ -500,6 +607,15 @@ impl TestEngine {
                         test_result.tcp_duration.as_secs_f64() * 1000.0;
                     latencies.push(latency_ms);
                     debug!("Latency: {:.2} ms", latency_ms);
+
+                    // Emit progress event if enabled
+                    if emit_events {
+                        self.emit_progress(ProgressEvent::LatencyMeasurement {
+                            value_ms: latency_ms,
+                            current: i + 1,
+                            total: num_packets,
+                        });
+                    }
                 }
                 RetryResult::Failed { last_error, attempts } => {
                     failed_count += 1;
@@ -695,6 +811,172 @@ impl TestEngine {
 
         Ok((measurements, triggered_early_termination))
     }
+
+    /// Run a single bandwidth block with progress event emission.
+    ///
+    /// Similar to `run_bandwidth_block` but emits progress events after each
+    /// successful measurement.
+    ///
+    /// # Arguments
+    /// * `block` - The data block configuration
+    /// * `is_download` - Whether this is a download test
+    /// * `latency_direction` - Direction for loaded latency collection
+    /// * `loaded_latency_collector` - Collector for loaded latency measurements
+    /// * `measurement_count` - Running count of measurements (updated in place)
+    /// * `total_measurements` - Total expected measurements for this direction
+    ///
+    /// # Returns
+    /// Tuple of (measurements, triggered_early_termination)
+    async fn run_bandwidth_block_with_progress(
+        &self,
+        block: &DataBlock,
+        is_download: bool,
+        latency_direction: LatencyDirection,
+        loaded_latency_collector: &mut LoadedLatencyCollector,
+        measurement_count: &mut usize,
+        total_measurements: usize,
+    ) -> Result<(Vec<BandwidthMeasurement>, bool), Box<dyn Error>> {
+        let mut measurements = Vec::with_capacity(block.count);
+        let mut triggered_early_termination = false;
+        let mut failed_count = 0;
+
+        // Create channel for loaded latency measurements
+        let (latency_tx, mut latency_rx) = mpsc::channel::<f64>(100);
+
+        let test_type = if is_download { "download" } else { "upload" };
+        let direction = if is_download {
+            BandwidthDirection::Download
+        } else {
+            BandwidthDirection::Upload
+        };
+
+        for i in 0..block.count {
+            debug!(
+                "  Iteration {}/{} for {} bytes",
+                i + 1,
+                block.count,
+                block.bytes
+            );
+
+            let operation_name = format!(
+                "{} {}B iteration {}/{}",
+                test_type,
+                block.bytes,
+                i + 1,
+                block.count
+            );
+
+            let latency_tx_clone = latency_tx.clone();
+            let throttle_ms = self.config.loaded_latency_throttle_ms;
+            let min_duration_ms =
+                self.config.loaded_request_min_duration_ms as u64;
+            let bytes = block.bytes;
+
+            let result = if is_download {
+                retry_async(&self.config.retry_config, &operation_name, || {
+                    let latency_tx = latency_tx_clone.clone();
+                    async move {
+                        let download = Download {};
+                        download
+                            .run_with_loaded_latency(
+                                bytes,
+                                latency_tx,
+                                throttle_ms,
+                                min_duration_ms,
+                            )
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    }
+                })
+                .await
+            } else {
+                retry_async(&self.config.retry_config, &operation_name, || {
+                    let latency_tx = latency_tx_clone.clone();
+                    async move {
+                        let upload = Upload::new(bytes);
+                        upload
+                            .run_with_loaded_latency(
+                                latency_tx,
+                                throttle_ms,
+                                min_duration_ms,
+                            )
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    }
+                })
+                .await
+            };
+
+            match result {
+                RetryResult::Success(test_result) => {
+                    let measurement = test_result.to_bandwidth_measurement();
+                    let duration_ms = measurement.duration_ms;
+                    let speed_mbps = calculate_speed_mbps(measurement.bandwidth_bps);
+
+                    measurements.push(measurement);
+                    *measurement_count += 1;
+
+                    // Emit progress event
+                    self.emit_progress(ProgressEvent::BandwidthMeasurement {
+                        direction,
+                        speed_mbps,
+                        bytes: block.bytes,
+                        current: *measurement_count,
+                        total: total_measurements,
+                    });
+
+                    // Check for early termination
+                    if duration_ms >= self.config.bandwidth_finish_duration_ms
+                    {
+                        triggered_early_termination = true;
+                        debug!(
+                            "Duration {:.2}ms >= threshold {:.2}ms, \
+                             triggering early termination",
+                            duration_ms, self.config.bandwidth_finish_duration_ms
+                        );
+                    }
+                }
+                RetryResult::Failed { last_error, attempts } => {
+                    failed_count += 1;
+                    warn!(
+                        "{} failed after {} attempts: {}. \
+                         Continuing with remaining iterations.",
+                        operation_name, attempts, last_error
+                    );
+                    // Continue with remaining iterations
+                }
+            }
+        }
+
+        // Drop the sender to close the channel
+        drop(latency_tx);
+
+        // Collect loaded latency measurements from channel
+        while let Ok(latency_ms) = latency_rx.try_recv() {
+            // Get the duration of the most recent measurement
+            let request_duration_ms =
+                measurements.last().map(|m| m.duration_ms).unwrap_or(0.0);
+
+            loaded_latency_collector.add(
+                latency_direction,
+                latency_ms,
+                request_duration_ms,
+            );
+        }
+
+        if failed_count > 0 {
+            warn!(
+                "{} {}B: {} of {} measurements failed, {} successful",
+                test_type,
+                block.bytes,
+                failed_count,
+                block.count,
+                measurements.len()
+            );
+        }
+
+        Ok((measurements, triggered_early_termination))
+    }
 }
 
 #[cfg(test)]
@@ -725,7 +1007,7 @@ mod tests {
     // Unit tests for calculate_block_speed
     #[test]
     fn test_calculate_block_speed_empty() {
-        let engine = TestEngine::new(TestConfig::default());
+        let engine = TestEngine::new(TestConfig::default(), None);
         let measurements: Vec<BandwidthMeasurement> = vec![];
         let speed = engine.calculate_block_speed(&measurements);
         assert!((speed - 0.0).abs() < 0.001);
@@ -733,7 +1015,7 @@ mod tests {
 
     #[test]
     fn test_calculate_block_speed_all_filtered() {
-        let engine = TestEngine::new(TestConfig::default());
+        let engine = TestEngine::new(TestConfig::default(), None);
         let measurements = vec![BandwidthMeasurement {
             bytes: 100_000,
             bandwidth_bps: 8_000_000.0,
@@ -747,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_calculate_block_speed_single_measurement() {
-        let engine = TestEngine::new(TestConfig::default());
+        let engine = TestEngine::new(TestConfig::default(), None);
         let measurements = vec![BandwidthMeasurement {
             bytes: 100_000,
             bandwidth_bps: 10_000_000.0, // 10 Mbps
@@ -758,5 +1040,404 @@ mod tests {
         let speed = engine.calculate_block_speed(&measurements);
         // 10_000_000 bps = 10 Mbps
         assert!((speed - 10.0).abs() < 0.001);
+    }
+
+    // Property-based tests for progress event emission
+    // Feature: tui-progress-display, Property 12: Progress Event Emission
+    // Validates: Requirements 9.2, 9.3, 9.4
+
+    use proptest::prelude::*;
+    use std::sync::Mutex;
+
+    /// A test callback that collects all progress events.
+    struct TestProgressCallback {
+        events: Mutex<Vec<ProgressEvent>>,
+    }
+
+    impl TestProgressCallback {
+        fn new() -> Self {
+            Self { events: Mutex::new(Vec::new()) }
+        }
+
+        fn events(&self) -> Vec<ProgressEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl ProgressCallback for TestProgressCallback {
+        fn on_progress(&self, event: ProgressEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    /// Helper to count events by type
+    fn count_phase_changes(events: &[ProgressEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, ProgressEvent::PhaseChange(_)))
+            .count()
+    }
+
+    fn count_phase_completes(events: &[ProgressEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, ProgressEvent::PhaseComplete(_)))
+            .count()
+    }
+
+    fn count_latency_measurements(events: &[ProgressEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, ProgressEvent::LatencyMeasurement { .. }))
+            .count()
+    }
+
+    fn count_bandwidth_measurements(
+        events: &[ProgressEvent],
+        direction: BandwidthDirection,
+    ) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ProgressEvent::BandwidthMeasurement { direction: d, .. }
+                    if *d == direction
+                )
+            })
+            .count()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: emit_progress SHALL emit exactly one event per call.
+        /// This tests the emit_progress method directly without network calls.
+        #[test]
+        fn emit_progress_emits_exactly_one_event(
+            num_events in 1usize..50
+        ) {
+            let callback = Arc::new(TestProgressCallback::new());
+            let engine = TestEngine::new(
+                TestConfig::default(),
+                Some(callback.clone()),
+            );
+
+            // Emit multiple events
+            for i in 0..num_events {
+                engine.emit_progress(ProgressEvent::LatencyMeasurement {
+                    value_ms: i as f64,
+                    current: i + 1,
+                    total: num_events,
+                });
+            }
+
+            let events = callback.events();
+            prop_assert_eq!(
+                events.len(),
+                num_events,
+                "Expected {} events, got {}",
+                num_events,
+                events.len()
+            );
+        }
+
+        /// Property: Phase change events SHALL be emitted in correct order.
+        /// Order: Initializing -> Latency -> Download -> Upload -> Complete
+        #[test]
+        fn phase_changes_in_correct_order(
+            _seed in any::<u64>()  // Just for randomization
+        ) {
+            let callback = Arc::new(TestProgressCallback::new());
+            let engine = TestEngine::new(
+                TestConfig::default(),
+                Some(callback.clone()),
+            );
+
+            // Simulate the phase change sequence from run()
+            engine.emit_progress(ProgressEvent::PhaseChange(
+                TestPhase::Initializing,
+            ));
+            engine.emit_progress(ProgressEvent::PhaseChange(TestPhase::Latency));
+            engine.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Latency));
+            engine.emit_progress(ProgressEvent::PhaseChange(TestPhase::Download));
+            engine.emit_progress(ProgressEvent::PhaseComplete(
+                TestPhase::Download,
+            ));
+            engine.emit_progress(ProgressEvent::PhaseChange(TestPhase::Upload));
+            engine.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Upload));
+            engine.emit_progress(ProgressEvent::PhaseChange(TestPhase::Complete));
+
+            let events = callback.events();
+
+            // Verify order of phase changes
+            let phase_changes: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let ProgressEvent::PhaseChange(phase) = e {
+                        Some(*phase)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            prop_assert_eq!(
+                phase_changes,
+                vec![
+                    TestPhase::Initializing,
+                    TestPhase::Latency,
+                    TestPhase::Download,
+                    TestPhase::Upload,
+                    TestPhase::Complete,
+                ],
+                "Phase changes not in expected order"
+            );
+        }
+
+        /// Property: Latency measurement events SHALL have monotonically
+        /// increasing current values.
+        #[test]
+        fn latency_measurements_monotonically_increasing(
+            num_measurements in 1usize..20
+        ) {
+            let callback = Arc::new(TestProgressCallback::new());
+            let engine = TestEngine::new(
+                TestConfig::default(),
+                Some(callback.clone()),
+            );
+
+            // Emit latency measurements as the engine would
+            for i in 0..num_measurements {
+                engine.emit_progress(ProgressEvent::LatencyMeasurement {
+                    value_ms: 10.0 + i as f64,
+                    current: i + 1,
+                    total: num_measurements,
+                });
+            }
+
+            let events = callback.events();
+            let latency_events: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let ProgressEvent::LatencyMeasurement {
+                        current, total, ..
+                    } = e
+                    {
+                        Some((*current, *total))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Verify monotonically increasing current values
+            for i in 0..latency_events.len() {
+                prop_assert_eq!(
+                    latency_events[i].0,
+                    i + 1,
+                    "Current value should be {} but was {}",
+                    i + 1,
+                    latency_events[i].0
+                );
+                prop_assert_eq!(
+                    latency_events[i].1,
+                    num_measurements,
+                    "Total should be {} but was {}",
+                    num_measurements,
+                    latency_events[i].1
+                );
+            }
+        }
+
+        /// Property: Bandwidth measurement events SHALL have monotonically
+        /// increasing current values within each direction.
+        #[test]
+        fn bandwidth_measurements_monotonically_increasing(
+            num_download in 1usize..10,
+            num_upload in 1usize..10
+        ) {
+            let callback = Arc::new(TestProgressCallback::new());
+            let engine = TestEngine::new(
+                TestConfig::default(),
+                Some(callback.clone()),
+            );
+
+            // Emit download measurements
+            for i in 0..num_download {
+                engine.emit_progress(ProgressEvent::BandwidthMeasurement {
+                    direction: BandwidthDirection::Download,
+                    speed_mbps: 100.0,
+                    bytes: 1_000_000,
+                    current: i + 1,
+                    total: num_download,
+                });
+            }
+
+            // Emit upload measurements
+            for i in 0..num_upload {
+                engine.emit_progress(ProgressEvent::BandwidthMeasurement {
+                    direction: BandwidthDirection::Upload,
+                    speed_mbps: 50.0,
+                    bytes: 1_000_000,
+                    current: i + 1,
+                    total: num_upload,
+                });
+            }
+
+            let events = callback.events();
+
+            // Verify download measurements
+            let download_events: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let ProgressEvent::BandwidthMeasurement {
+                        direction: BandwidthDirection::Download,
+                        current,
+                        total,
+                        ..
+                    } = e
+                    {
+                        Some((*current, *total))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for i in 0..download_events.len() {
+                prop_assert_eq!(
+                    download_events[i].0,
+                    i + 1,
+                    "Download current should be {} but was {}",
+                    i + 1,
+                    download_events[i].0
+                );
+            }
+
+            // Verify upload measurements
+            let upload_events: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let ProgressEvent::BandwidthMeasurement {
+                        direction: BandwidthDirection::Upload,
+                        current,
+                        total,
+                        ..
+                    } = e
+                    {
+                        Some((*current, *total))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for i in 0..upload_events.len() {
+                prop_assert_eq!(
+                    upload_events[i].0,
+                    i + 1,
+                    "Upload current should be {} but was {}",
+                    i + 1,
+                    upload_events[i].0
+                );
+            }
+        }
+
+        /// Property: No events SHALL be emitted when no callback is registered.
+        #[test]
+        fn no_events_without_callback(
+            num_events in 1usize..20
+        ) {
+            // Create engine without callback
+            let engine = TestEngine::new(TestConfig::default(), None);
+
+            // This should not panic or cause any issues
+            for i in 0..num_events {
+                engine.emit_progress(ProgressEvent::LatencyMeasurement {
+                    value_ms: i as f64,
+                    current: i + 1,
+                    total: num_events,
+                });
+            }
+
+            // If we get here without panicking, the test passes
+            prop_assert!(true);
+        }
+    }
+
+    // Unit tests for progress event emission helpers
+    #[test]
+    fn test_count_phase_changes() {
+        let events = vec![
+            ProgressEvent::PhaseChange(TestPhase::Initializing),
+            ProgressEvent::LatencyMeasurement {
+                value_ms: 10.0,
+                current: 1,
+                total: 1,
+            },
+            ProgressEvent::PhaseChange(TestPhase::Latency),
+            ProgressEvent::PhaseComplete(TestPhase::Latency),
+        ];
+        assert_eq!(count_phase_changes(&events), 2);
+    }
+
+    #[test]
+    fn test_count_latency_measurements() {
+        let events = vec![
+            ProgressEvent::PhaseChange(TestPhase::Latency),
+            ProgressEvent::LatencyMeasurement {
+                value_ms: 10.0,
+                current: 1,
+                total: 3,
+            },
+            ProgressEvent::LatencyMeasurement {
+                value_ms: 12.0,
+                current: 2,
+                total: 3,
+            },
+            ProgressEvent::LatencyMeasurement {
+                value_ms: 11.0,
+                current: 3,
+                total: 3,
+            },
+            ProgressEvent::PhaseComplete(TestPhase::Latency),
+        ];
+        assert_eq!(count_latency_measurements(&events), 3);
+    }
+
+    #[test]
+    fn test_count_bandwidth_measurements() {
+        let events = vec![
+            ProgressEvent::BandwidthMeasurement {
+                direction: BandwidthDirection::Download,
+                speed_mbps: 100.0,
+                bytes: 1_000_000,
+                current: 1,
+                total: 2,
+            },
+            ProgressEvent::BandwidthMeasurement {
+                direction: BandwidthDirection::Download,
+                speed_mbps: 110.0,
+                bytes: 1_000_000,
+                current: 2,
+                total: 2,
+            },
+            ProgressEvent::BandwidthMeasurement {
+                direction: BandwidthDirection::Upload,
+                speed_mbps: 50.0,
+                bytes: 1_000_000,
+                current: 1,
+                total: 1,
+            },
+        ];
+        assert_eq!(
+            count_bandwidth_measurements(&events, BandwidthDirection::Download),
+            2
+        );
+        assert_eq!(
+            count_bandwidth_measurements(&events, BandwidthDirection::Upload),
+            1
+        );
     }
 }

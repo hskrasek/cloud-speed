@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Jujutsu Commit on Task Completion",
+  "description": "Automatically commits changes using Jujutsu (jj) with a descriptive commit message when the agent stops after completing a task from a specification.",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "jj commit -m \"$(jj diff --summary | head -5 | tr '\\n' ' ')\""
+  }
+}
