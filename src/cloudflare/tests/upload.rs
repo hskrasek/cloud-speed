@@ -1,8 +1,6 @@
 use crate::cloudflare::requests::UA;
 use crate::cloudflare::tests::{IoReadAndWrite, Test, TestResults, BASE_URL};
-use crate::measurements::parse_server_timing;
 use hickory_resolver::Resolver;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
 use log::{debug, info};
 use reqwest::Method;
 use rustls_connector::RustlsConnector;
@@ -11,7 +9,6 @@ use std::convert::Into;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -198,21 +195,22 @@ fn execute_http_post(
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
     let header = build_http_post_header(url, data.len());
     debug!("\r\n{}", header);
-    let now = Instant::now();
+    let upload_start = Instant::now();
 
     // Write headers
     tcp.write_all(header.as_bytes())?;
-    // Write body
+    // Write body - this is the actual upload
     tcp.write_all(data)?;
     tcp.flush()?;
 
-    let connect_duration = now.elapsed();
-
-    // Read first byte (TTFB)
+    // Read first byte (TTFB) - this marks when server received all data
+    // and started responding
     let mut one_byte_buffer = [0_u8];
-    let now = Instant::now();
     tcp.read_exact(&mut one_byte_buffer)?;
-    let ttfb_duration = now.elapsed();
+
+    // For uploads, the transfer time is from start of write to TTFB
+    // This captures the actual network transfer time
+    let upload_duration = upload_start.elapsed();
 
     // Read headers
     let mut headers: Vec<u8> = Vec::new();
@@ -227,22 +225,16 @@ fn execute_http_post(
         }
     }
 
-    let headers = extract_http_headers(String::from_utf8(headers).unwrap());
-
-    // Extract server processing time from server-timing header
-    let server_time = headers
-        .get(HeaderName::from_static("server-timing"))
-        .and_then(|h| h.to_str().ok())
-        .and_then(parse_server_timing)
-        .unwrap_or(Duration::ZERO);
-
-    // Read any remaining response body
+    // Read any remaining response body (we don't need server-timing for uploads)
     let mut buff = Vec::new();
     tcp.read_to_end(&mut buff)?;
 
-    let end_duration = now.elapsed();
-
-    Ok((connect_duration, ttfb_duration, server_time, end_duration))
+    // For uploads: return upload_duration as end_duration and Duration::ZERO
+    // for both ttfb and server_time. This way:
+    // - transfer_duration() = end_duration - ttfb = upload_duration
+    // - bandwidth calculation uses upload_duration directly without subtracting
+    //   server_time (which for uploads includes the receive time)
+    Ok((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
 }
 
 fn build_http_post_header(url: &Url, content_length: usize) -> String {
@@ -262,30 +254,6 @@ fn build_http_post_header(url: &Url, content_length: usize) -> String {
     )
 }
 
-fn extract_http_headers(raw_headers: String) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-
-    for line in raw_headers.lines() {
-        let line = line.trim();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        if !line.contains(":") {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.splitn(2, ':').collect();
-        let name = HeaderName::from_str(parts[0].trim()).unwrap();
-        let value = HeaderValue::from_str(parts[1].trim()).unwrap();
-
-        headers.append(name, value);
-    }
-
-    headers
-}
-
 /// Execute HTTP POST with concurrent latency measurements.
 ///
 /// This function performs the HTTP POST request while spawning a background
@@ -303,21 +271,13 @@ async fn execute_http_post_with_latency(
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
     let header = build_http_post_header(url, data.len());
     debug!("\r\n{}", header);
-    let request_start = Instant::now();
+    let upload_start = Instant::now();
 
-    // Write headers
-    tcp.write_all(header.as_bytes())?;
-    // Write body
-    tcp.write_all(data)?;
-    tcp.flush()?;
-
-    let connect_duration = request_start.elapsed();
-
-    // Start latency measurement task
+    // Start latency measurement task before upload begins
     let latency_tx_clone = latency_tx.clone();
     let throttle_duration = Duration::from_millis(throttle_ms);
     let min_duration = Duration::from_millis(min_request_duration_ms);
-    let request_start_clone = request_start;
+    let upload_start_clone = upload_start;
 
     // Use Arc to share the stop flag between tasks
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -346,7 +306,7 @@ async fn execute_http_post_with_latency(
             }
 
             // Only measure if request has been running long enough
-            let request_duration = request_start_clone.elapsed();
+            let request_duration = upload_start_clone.elapsed();
             if request_duration >= min_duration {
                 // Measure latency using TCP handshake time
                 if let Ok(latency_ms) = measure_tcp_latency(ip_address, port) {
@@ -358,11 +318,20 @@ async fn execute_http_post_with_latency(
         }
     });
 
-    // Read first byte (TTFB)
+    // Write headers
+    tcp.write_all(header.as_bytes())?;
+    // Write body - this is the actual upload
+    tcp.write_all(data)?;
+    tcp.flush()?;
+
+    // Read first byte (TTFB) - this marks when server received all data
+    // and started responding
     let mut one_byte_buffer = [0_u8];
-    let ttfb_start = Instant::now();
     tcp.read_exact(&mut one_byte_buffer)?;
-    let ttfb_duration = ttfb_start.elapsed();
+
+    // For uploads, the transfer time is from start of write to TTFB
+    // This captures the actual network transfer time
+    let upload_duration = upload_start.elapsed();
 
     // Read headers
     let mut headers: Vec<u8> = Vec::new();
@@ -377,20 +346,9 @@ async fn execute_http_post_with_latency(
         }
     }
 
-    let headers = extract_http_headers(String::from_utf8(headers).unwrap());
-
-    // Extract server processing time from server-timing header
-    let server_time = headers
-        .get(HeaderName::from_static("server-timing"))
-        .and_then(|h| h.to_str().ok())
-        .and_then(parse_server_timing)
-        .unwrap_or(Duration::ZERO);
-
-    // Read any remaining response body
+    // Read any remaining response body (we don't need server-timing for uploads)
     let mut buff = Vec::new();
     tcp.read_to_end(&mut buff)?;
-
-    let end_duration = ttfb_start.elapsed();
 
     // Signal latency task to stop
     stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -399,7 +357,12 @@ async fn execute_http_post_with_latency(
     let _ =
         tokio::time::timeout(Duration::from_millis(100), latency_handle).await;
 
-    Ok((connect_duration, ttfb_duration, server_time, end_duration))
+    // For uploads: return upload_duration as end_duration and Duration::ZERO
+    // for both ttfb and server_time. This way:
+    // - transfer_duration() = end_duration - ttfb = upload_duration
+    // - bandwidth calculation uses upload_duration directly without subtracting
+    //   server_time (which for uploads includes the receive time)
+    Ok((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
 }
 
 /// Measure TCP latency by performing a TCP handshake.
