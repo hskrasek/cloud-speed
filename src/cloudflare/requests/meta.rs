@@ -31,7 +31,7 @@ impl Request for MetaRequest {
 
     type Response = Meta;
 
-    fn endpoint(&self) -> Cow<str> {
+    fn endpoint(&'_ self) -> Cow<'_, str> {
         "/meta".into()
     }
 }

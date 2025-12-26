@@ -1,10 +1,10 @@
 extern crate serde;
 
-pub mod download;
 pub mod locations;
 pub mod meta;
-pub mod upload;
 
+use http::header::REFERER;
+use http::HeaderValue;
 use reqwest::{
     header::{HeaderMap, USER_AGENT},
     Body, Method,
@@ -21,16 +21,13 @@ pub const UA: &str = concat!(
     ")"
 );
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default,
+)]
 pub enum RequestBody<T> {
+    #[default]
     None,
     Text(T),
-}
-
-impl<T> Default for RequestBody<T> {
-    fn default() -> Self {
-        RequestBody::None
-    }
 }
 
 pub trait Request {
@@ -40,12 +37,16 @@ pub trait Request {
 
     const METHOD: Method = Method::GET;
 
-    fn endpoint(&self) -> Cow<str>;
+    fn endpoint(&'_ self) -> Cow<'_, str>;
 
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
 
         headers.insert(USER_AGENT, UA.parse().unwrap());
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://speed.cloudflare.com/"),
+        );
 
         headers
     }
@@ -61,7 +62,7 @@ impl<R: Request> Request for &R {
 
     const METHOD: Method = R::METHOD;
 
-    fn endpoint(&self) -> Cow<str> {
+    fn endpoint(&'_ self) -> Cow<'_, str> {
         (**self).endpoint()
     }
 
@@ -80,7 +81,7 @@ impl<R: Request> Request for &mut R {
 
     const METHOD: Method = R::METHOD;
 
-    fn endpoint(&self) -> Cow<str> {
+    fn endpoint(&'_ self) -> Cow<'_, str> {
         (**self).endpoint()
     }
 

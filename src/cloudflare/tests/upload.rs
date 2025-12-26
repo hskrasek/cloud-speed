@@ -4,6 +4,7 @@ use crate::measurements::parse_server_timing;
 use hickory_resolver::Resolver;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use log::{debug, info};
+use reqwest::Method;
 use rustls_connector::RustlsConnector;
 use std::borrow::Cow;
 use std::convert::Into;
@@ -18,34 +19,59 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use url::Url;
 
-pub(crate) struct Download {}
+/// Upload test implementation for measuring upload bandwidth.
+///
+/// This struct performs upload tests by POSTing data to Cloudflare's
+/// `/__up` endpoint and measuring the timing breakdown.
+pub(crate) struct Upload {
+    /// Pre-generated payload data to upload
+    data: Vec<u8>,
+}
 
-impl Download {
-    /// Run the download test with concurrent loaded latency measurements.
+impl Upload {
+    /// Create a new upload test with the specified payload size.
     ///
-    /// This method performs a download test while simultaneously measuring
+    /// # Arguments
+    /// * `bytes` - Number of bytes to upload
+    ///
+    /// # Returns
+    /// A new Upload instance with pre-generated payload data
+    pub fn new(bytes: u64) -> Self {
+        // Generate payload data (zeros are efficient and compress well)
+        let data = vec![b'0'; bytes as usize];
+        Self { data }
+    }
+
+    /// Get the size of the upload payload in bytes.
+    pub fn bytes(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    /// Run the upload test with concurrent loaded latency measurements.
+    ///
+    /// This method performs an upload test while simultaneously measuring
     /// latency at regular intervals. Latency measurements are sent through
     /// the provided channel.
     ///
     /// # Arguments
-    /// * `bytes` - Number of bytes to download
-    /// * `latency_tx` - Channel sender for latency measurements (in milliseconds)
-    /// * `throttle_ms` - Minimum interval between latency measurements (typically 400ms)
-    /// * `min_request_duration_ms` - Minimum request duration to include latency (typically 250ms)
+    /// * `latency_tx` - Channel sender for latency measurements (in ms)
+    /// * `throttle_ms` - Minimum interval between latency measurements
+    /// * `min_request_duration_ms` - Minimum request duration to include
+    ///   latency (typically 250ms)
     ///
     /// # Returns
     /// The test results including timing breakdown
     pub async fn run_with_loaded_latency(
         &self,
-        bytes: u64,
         latency_tx: mpsc::Sender<f64>,
         throttle_ms: u64,
         min_request_duration_ms: u64,
     ) -> Result<TestResults, Box<dyn Error>> {
-        info!("Beginning Download Test with loaded latency: {}", bytes);
-        let mut url =
+        let bytes = self.bytes();
+        info!("Beginning Upload Test with loaded latency: {}", bytes);
+
+        let url =
             Url::parse(format!("{}/{}", BASE_URL, self.endpoint()).as_str())?;
-        url.set_query(Some(format!("bytes={}", bytes).as_str()));
 
         let (ip_address, _dns_duration) = resolve_dns(&url)?;
         let port = url.port_or_known_default().unwrap();
@@ -53,11 +79,12 @@ impl Download {
         let (mut stream, _tls_handshake_duration) =
             tls_handshake_duration(stream, &url)?;
 
-        // Execute HTTP GET with concurrent latency measurements
+        // Execute HTTP POST with concurrent latency measurements
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
-            execute_http_get_with_latency(
+            execute_http_post_with_latency(
                 &mut stream,
                 &url,
+                &self.data,
                 ip_address,
                 port,
                 latency_tx,
@@ -76,17 +103,20 @@ impl Download {
     }
 }
 
-impl Test for Download {
+impl Test for Upload {
+    const METHOD: Method = Method::POST;
+
     fn endpoint(&'_ self) -> Cow<'_, str> {
-        "__down".into()
+        "__up".into()
     }
 
-    async fn run(&self, bytes: u64) -> Result<TestResults, Box<dyn Error>> {
-        info!("Beginning Download Test: {}", bytes);
-        let mut url =
+    async fn run(&self, _bytes: u64) -> Result<TestResults, Box<dyn Error>> {
+        // Note: bytes parameter is ignored; we use self.data.len() instead
+        let bytes = self.bytes();
+        info!("Beginning Upload Test: {}", bytes);
+
+        let url =
             Url::parse(format!("{}/{}", BASE_URL, self.endpoint()).as_str())?;
-        // Add query param or body based on test method
-        url.set_query(Some(format!("bytes={}", bytes).as_str()));
 
         let (_ip_address, _dns_duration) = resolve_dns(&url)?;
         let port = url.port_or_known_default().unwrap();
@@ -94,7 +124,7 @@ impl Test for Download {
         let (mut stream, _tls_handshake_duration) =
             tls_handshake_duration(stream, &url)?;
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
-            execute_http_get(&mut stream, &url)?;
+            execute_http_post(&mut stream, &url, &self.data)?;
 
         Ok(TestResults::new(
             tcp_connect_duration,
@@ -161,24 +191,30 @@ fn tls_handshake_duration(
     Ok((Box::new(stream), tls_handshake_duration))
 }
 
-fn execute_http_get(
+fn execute_http_post(
     tcp: &mut Box<dyn IoReadAndWrite>,
     url: &Url,
+    data: &[u8],
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
-    let header = build_http_header(url);
+    let header = build_http_post_header(url, data.len());
     debug!("\r\n{}", header);
     let now = Instant::now();
 
+    // Write headers
     tcp.write_all(header.as_bytes())?;
+    // Write body
+    tcp.write_all(data)?;
     tcp.flush()?;
 
     let connect_duration = now.elapsed();
 
+    // Read first byte (TTFB)
     let mut one_byte_buffer = [0_u8];
     let now = Instant::now();
     tcp.read_exact(&mut one_byte_buffer)?;
     let ttfb_duration = now.elapsed();
 
+    // Read headers
     let mut headers: Vec<u8> = Vec::new();
     headers.push(one_byte_buffer[0]);
 
@@ -200,8 +236,8 @@ fn execute_http_get(
         .and_then(parse_server_timing)
         .unwrap_or(Duration::ZERO);
 
+    // Read any remaining response body
     let mut buff = Vec::new();
-
     tcp.read_to_end(&mut buff)?;
 
     let end_duration = now.elapsed();
@@ -209,19 +245,20 @@ fn execute_http_get(
     Ok((connect_duration, ttfb_duration, server_time, end_duration))
 }
 
-fn build_http_header(url: &Url) -> String {
+fn build_http_post_header(url: &Url, content_length: usize) -> String {
     format!(
-        "GET {}?{} HTTP/1.1\r\n\
+        "POST {} HTTP/1.1\r\n\
         Host: {}\r\n\
         User-Agent: {}\r\n\
         Accept: */*\r\n\
-        Accept-Encoding: gzip, deflate, br, zstd\r\n\
+        Content-Type: text/plain;charset=UTF-8\r\n\
+        Content-Length: {}\r\n\
         Connection: close\r\n\
         \r\n",
         url.path(),
-        url.query().unwrap(),
         url.host_str().unwrap(),
-        UA
+        UA,
+        content_length
     )
 }
 
@@ -249,25 +286,29 @@ fn extract_http_headers(raw_headers: String) -> HeaderMap {
     headers
 }
 
-/// Execute HTTP GET with concurrent latency measurements.
+/// Execute HTTP POST with concurrent latency measurements.
 ///
-/// This function performs the HTTP GET request while spawning a background
+/// This function performs the HTTP POST request while spawning a background
 /// task that measures latency at regular intervals. Latency measurements
 /// are only included if the request duration exceeds the minimum threshold.
-async fn execute_http_get_with_latency(
+async fn execute_http_post_with_latency(
     tcp: &mut Box<dyn IoReadAndWrite>,
     url: &Url,
+    data: &[u8],
     ip_address: IpAddr,
     port: u16,
     latency_tx: mpsc::Sender<f64>,
     throttle_ms: u64,
     min_request_duration_ms: u64,
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
-    let header = build_http_header(url);
+    let header = build_http_post_header(url, data.len());
     debug!("\r\n{}", header);
     let request_start = Instant::now();
 
+    // Write headers
     tcp.write_all(header.as_bytes())?;
+    // Write body
+    tcp.write_all(data)?;
     tcp.flush()?;
 
     let connect_duration = request_start.elapsed();
@@ -345,7 +386,7 @@ async fn execute_http_get_with_latency(
         .and_then(parse_server_timing)
         .unwrap_or(Duration::ZERO);
 
-    // Read body
+    // Read any remaining response body
     let mut buff = Vec::new();
     tcp.read_to_end(&mut buff)?;
 
@@ -363,7 +404,7 @@ async fn execute_http_get_with_latency(
 
 /// Measure TCP latency by performing a TCP handshake.
 ///
-/// This is used for loaded latency measurements during downloads/uploads.
+/// This is used for loaded latency measurements during uploads.
 /// Returns the round-trip time in milliseconds.
 fn measure_tcp_latency(
     ip_address: IpAddr,

@@ -1,31 +1,33 @@
 extern crate clap;
 
 mod cloudflare;
+pub mod errors;
 mod measurements;
+pub mod results;
+pub mod retry;
+mod scoring;
 mod stats;
 
 use crate::cloudflare::client::Client;
-use crate::cloudflare::requests::{
-    locations::{Location, Locations},
-    meta::{Meta, MetaRequest},
-    upload::Upload,
+use crate::cloudflare::requests::{locations::Locations, meta::MetaRequest};
+use crate::cloudflare::tests::engine::{TestConfig, TestEngine};
+use crate::cloudflare::tests::packet_loss::{
+    run_packet_loss_test_safe, PacketLossConfig,
 };
-use crate::cloudflare::tests::download::Download as DownloadTest;
-use crate::cloudflare::tests::{Test, TestResults};
-use crate::measurements::{jitter, jitter_f64, latency, latency_f64};
-use crate::stats::{median, median_f64, quartile};
-use chrono::{DateTime, Utc};
+use crate::errors::{
+    classify_error, exit_codes, format_error_for_display, ErrorKind,
+    SpeedTestError,
+};
+use crate::results::{
+    AimScoresOutput, BandwidthResults, ConnectionMeta, LatencyResults,
+    PacketLossResults, ServerLocation, SizeMeasurement, SpeedTestResults,
+};
+use crate::scoring::{calculate_aim_scores, ConnectionMetrics, QualityScore};
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
-use futures::future::join_all;
-use log::{debug, info};
-use serde::Serialize;
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::join;
-use tokio::time::Instant;
+use std::process;
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -46,324 +48,417 @@ struct Cli {
     #[arg(short, long, default_value_t = false)]
     pretty: bool,
 
+    /// TURN server URI for packet loss measurement (e.g., turn:example.com:3478)
+    #[arg(long)]
+    turn_server: Option<String>,
+
     #[command(flatten)]
     verbose: Verbosity,
 }
 
-#[derive(Serialize)]
-struct SpeedTestResults<'a> {
-    timestamp: DateTime<Utc>,
-    meta: &'a Meta,
-    location: &'a Location,
-    latency: u128,
-    jitter: u128,
-    download_results: DownloadResults,
-    download_speed: f64,
-    upload_speed: f64,
-}
-
-#[derive(Serialize)]
-struct DownloadResults {
-    #[serde(rename(serialize = "100kb"))]
-    _100kb: f64,
-    #[serde(rename(serialize = "1MB"))]
-    _1mb: f64,
-    #[serde(rename(serialize = "10MB"))]
-    _10mb: f64,
-    #[serde(rename(serialize = "25MB"))]
-    _25mb: f64,
-    #[serde(rename(serialize = "100MB"))]
-    _100mb: f64,
+impl Cli {
+    /// Get the packet loss configuration if TURN server is provided.
+    fn packet_loss_config(&self) -> Option<PacketLossConfig> {
+        self.turn_server
+            .as_ref()
+            .map(|uri| PacketLossConfig::new(uri.clone()))
+    }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = Arc::new(Mutex::new(io::stdout().lock()));
-    let mut _stderr = io::stderr().lock();
-
+async fn main() {
     let cli: Cli = Cli::parse();
 
     env_logger::Builder::new()
         .filter_level(cli.verbose.log_level_filter())
         .init();
 
+    let exit_code = match run_speed_test(&cli).await {
+        Ok(()) => exit_codes::SUCCESS,
+        Err(e) => {
+            let error = create_user_error(e.as_ref());
+            print_error(&error, cli.json);
+            error.exit_code()
+        }
+    };
+
+    process::exit(exit_code);
+}
+
+/// Create a user-friendly error from a generic error.
+fn create_user_error(
+    error: &(dyn std::error::Error + 'static),
+) -> SpeedTestError {
+    let kind = classify_error(error);
+    let message = error.to_string();
+
+    match kind {
+        ErrorKind::Network => SpeedTestError::network(format!(
+            "Failed to connect to speed.cloudflare.com: {}",
+            message
+        )),
+        ErrorKind::Dns => SpeedTestError::dns(format!(
+            "Failed to resolve speed.cloudflare.com: {}",
+            message
+        )),
+        ErrorKind::Timeout => SpeedTestError::timeout(format!(
+            "Connection timed out: {}",
+            message
+        )),
+        ErrorKind::Tls => SpeedTestError::tls(format!(
+            "TLS/SSL connection failed: {}",
+            message
+        )),
+        ErrorKind::Api => {
+            SpeedTestError::api(format!("Cloudflare API error: {}", message))
+        }
+        _ => SpeedTestError::new(kind, message),
+    }
+}
+
+/// Print an error message to stderr.
+fn print_error(error: &SpeedTestError, json_mode: bool) {
+    if json_mode {
+        // Output error as JSON
+        let error_json = serde_json::json!({
+            "error": {
+                "kind": format!("{:?}", error.kind),
+                "message": error.message,
+                "suggestion": error.suggestion,
+            }
+        });
+        eprintln!(
+            "{}",
+            serde_json::to_string(&error_json).unwrap_or_default()
+        );
+    } else {
+        // Output human-readable error
+        eprintln!("{}", format_error_for_display(error).red());
+    }
+}
+
+/// Run the speed test and return a result.
+async fn run_speed_test(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
 
-    let meta = client.send(MetaRequest {}).await?;
+    // Fetch connection metadata
+    let meta = client
+        .send(MetaRequest {})
+        .await
+        .map_err(|e| format!("Failed to fetch connection metadata: {}", e))?;
 
-    let location = client.send(Locations {}).await?.get(&meta.colo);
+    let location = client
+        .send(Locations {})
+        .await
+        .map_err(|e| format!("Failed to fetch server locations: {}", e))?
+        .get(&meta.colo);
 
+    // Display metadata (human-readable mode only)
     if !cli.json {
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {} {}",
-            "Server Location:".bold().white(),
-            location.city.bright_blue(),
-            format!("({})", meta.colo).bright_blue()
-        )?;
-
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {} {}",
-            "Your network:\t".bold().white(),
-            meta.as_organization.bright_blue(),
-            format!("(AS{})", meta.asn).bright_blue()
-        )?;
-
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {} {}",
-            "Your IP:\t".bold().white(),
-            meta.client_ip.bright_blue(),
-            format!("({})", meta.country).bright_blue()
-        )?;
+        print_metadata(&meta, &location)?;
     }
 
-    let measurements = latency_measurements().await;
+    // Run the test engine
+    let engine = TestEngine::new(TestConfig::default());
+    let output =
+        engine.run().await.map_err(|e| format!("Speed test failed: {}", e))?;
 
-    let (latency, jitter) =
-        join!(latency_f64(&measurements), jitter_f64(&measurements));
+    // Run packet loss test if configured
+    let packet_loss_config = cli.packet_loss_config();
+    let packet_loss_result =
+        run_packet_loss_test_safe(packet_loss_config).await;
 
-    if !cli.json {
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "Latency:\t".bold().white(),
-            format!("{:.2} ms", latency).bright_red()
-        )?;
-
-        writeln!(
-            stdout.lock().unwrap(),
-            "{} {}",
-            "Jitter:\t\t".bold().white(),
-            format!("{:.2} ms", jitter).bright_red()
-        )?;
-    }
-
-    let (
-        mut download_measurements_100kb,
-        mut download_measurements_1mb,
-        // download_measurements_10mb,
-        // download_measurements_25mb,
-        // download_measurements_100mb,
-    ) = join!(
-        measure_download(100_000, 10),
-        measure_download(1_000_000, 8),
-        // measure_download(10_000_000, 6),
-        // measure_download(25_000_000, 4),
-        // measure_download(100_000_000, 3)
+    // Build result structures
+    let server =
+        ServerLocation::new(location.city.clone(), location.iata.clone());
+    let connection = ConnectionMeta::new(
+        meta.client_ip.clone(),
+        meta.country.clone(),
+        meta.as_organization.clone(),
+        meta.asn,
     );
 
-    // let download_measurements: Vec<Duration> = vec![
-    //     download_measurements_100kb.as_slice(),
-    //     download_measurements_1mb.as_slice(),
-    //     download_measurements_10mb.as_slice(),
-    //     download_measurements_25mb.as_slice(),
-    //     download_measurements_100mb.as_slice(),
-    // ]
-    // .concat();
+    let latency = LatencyResults::new(
+        output.latency.idle_ms,
+        output.latency.idle_jitter_ms,
+        output.latency.loaded_down_ms,
+        output.latency.loaded_down_jitter_ms,
+        output.latency.loaded_up_ms,
+        output.latency.loaded_up_jitter_ms,
+    );
 
-    // let (
-    //     upload_measurements_100kb,
-    //     upload_measurements_1mb,
-    //     upload_measurements_10mb,
-    //     upload_measurements_25mb,
-    //     upload_measurements_50mb,
-    // ) = join!(
-    //     measure_upload(&client, 1e+5 as usize, 8),
-    //     measure_upload(&client, 1e+6 as usize, 6),
-    //     measure_upload(&client, 1e+7 as usize, 4),
-    //     measure_upload(&client, 2.5e+7 as usize, 4),
-    //     measure_upload(&client, 5e+7 as usize, 3)
-    // );
-    //
-    // let upload_measurements: Vec<Duration> = vec![
-    //     upload_measurements_100kb.as_slice(),
-    //     upload_measurements_1mb.as_slice(),
-    //     upload_measurements_10mb.as_slice(),
-    //     upload_measurements_25mb.as_slice(),
-    //     upload_measurements_50mb.as_slice(),
-    // ]
-    // .concat();
+    let download = BandwidthResults::new(
+        output.download.speed_mbps,
+        output
+            .download
+            .measurements
+            .iter()
+            .map(|m| SizeMeasurement::new(m.bytes, m.speed_mbps, m.count))
+            .collect(),
+        output.download.early_terminated,
+    );
 
-    // let results = SpeedTestResults {
-    //     timestamp: Utc::now(),
-    //     meta: &meta,
-    //     location: &location,
-    //     latency: latency.as_millis(),
-    //     jitter,
-    //     download_results: DownloadResults {
-    //         _100kb: median(&download_measurements_100kb),
-    //         _1mb: median(&download_measurements_1mb),
-    //         _10mb: median(&download_measurements_10mb),
-    //         _25mb: median(&download_measurements_25mb),
-    //         _100mb: median(&download_measurements_100mb),
-    //     },
-    //     download_speed: quartile(&download_measurements, 0.9),
-    //     upload_speed: quartile(&upload_measurements, 0.9),
-    // };
-    //
-    // if cli.json {
-    //     writeln!(
-    //         stdout.lock().unwrap(),
-    //         "{}",
-    //         if !cli.pretty {
-    //             serde_json::to_string(&results)?
-    //         } else {
-    //             serde_json::to_string_pretty(&results)?
-    //         }
-    //     )?;
-    //
-    //     return Ok(());
-    // }
-    dbg!(&download_measurements_100kb);
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "100kB speed:\t".bold().white(),
-        format!(
-            "{:.2} Mbps",
-            measure_speed(
-                100_000.0,
-                median_f64(&mut download_measurements_100kb).unwrap()
-            )
-        )
-        .yellow()
-    )?;
-    dbg!(&download_measurements_1mb);
-    writeln!(
-        stdout.lock().unwrap(),
-        "{} {}",
-        "1MB speed:\t".bold().white(),
-        format!(
-            "{:.2} Mbps",
-            measure_speed(
-                1_000_000.0,
-                median_f64(&mut download_measurements_1mb).unwrap()
-            )
-        )
-        .yellow()
-    )?;
+    let upload = BandwidthResults::new(
+        output.upload.speed_mbps,
+        output
+            .upload
+            .measurements
+            .iter()
+            .map(|m| SizeMeasurement::new(m.bytes, m.speed_mbps, m.count))
+            .collect(),
+        output.upload.early_terminated,
+    );
 
-    // writeln!(
-    //     stdout.lock().unwrap(),
-    //     "{} {}",
-    //     "10MB speed:\t".bold().white(),
-    //     format!("{:.2} Mbps", median(&download_measurements_10mb)).yellow()
-    // )?;
-    //
-    // writeln!(
-    //     stdout.lock().unwrap(),
-    //     "{} {}",
-    //     "25MB speed:\t".bold().white(),
-    //     format!("{:.2} Mbps", median(&download_measurements_25mb)).yellow()
-    // )?;
-    //
-    // writeln!(
-    //     stdout.lock().unwrap(),
-    //     "{} {}",
-    //     "100MB speed:\t".bold().white(),
-    //     format!("{:.2} Mbps", median(&download_measurements_100mb)).yellow()
-    // )?;
-    //
-    // writeln!(
-    //     stdout.lock().unwrap(),
-    //     "{} {}",
-    //     "Download speed:\t".bold().white(),
-    //     format!("{:.2} Mbps", quartile(&download_measurements, 0.9))
-    //         .bright_cyan()
-    // )?;
-    //
-    // writeln!(
-    //     stdout.lock().unwrap(),
-    //     "{} {}",
-    //     "Upload speed:\t".bold().white(),
-    //     format!("{:.2} Mbps", quartile(&upload_measurements, 0.9))
-    //         .bright_cyan()
-    // )?;
+    let packet_loss = if packet_loss_result.is_available() {
+        Some(PacketLossResults::new(
+            packet_loss_result.packet_loss_ratio,
+            packet_loss_result.packets_sent,
+            packet_loss_result.packets_lost,
+            packet_loss_result.packets_received,
+            packet_loss_result.avg_rtt_ms,
+        ))
+    } else {
+        None
+    };
+
+    // Calculate AIM scores
+    let metrics = ConnectionMetrics::new(
+        download.speed_mbps,
+        upload.speed_mbps,
+        latency.idle_ms,
+        latency.idle_jitter_ms.unwrap_or(0.0),
+    )
+    .with_loaded_latency(latency.loaded_down_ms, latency.loaded_up_ms);
+
+    let metrics = if let Some(ref pl) = packet_loss {
+        metrics.with_packet_loss(pl.ratio)
+    } else {
+        metrics
+    };
+
+    let aim_scores = calculate_aim_scores(&metrics);
+    let scores = AimScoresOutput::from_aim_scores(&aim_scores);
+
+    let results = SpeedTestResults::new(
+        server,
+        connection,
+        latency.clone(),
+        download.clone(),
+        upload.clone(),
+        packet_loss.clone(),
+        scores,
+    );
+
+    // Output results
+    if cli.json {
+        print_json_output(&results, cli.pretty)?;
+    } else {
+        print_human_output(
+            &latency,
+            &download,
+            &upload,
+            &packet_loss,
+            &aim_scores,
+        )?;
+    }
 
     Ok(())
 }
 
-async fn latency_measurements() -> Vec<f64> {
-    let mut tests: Vec<_> = Vec::new();
+/// Print connection metadata in human-readable format.
+fn print_metadata(
+    meta: &crate::cloudflare::requests::meta::Meta,
+    location: &crate::cloudflare::requests::locations::Location,
+) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
 
-    for _ in 0..10 {
-        tests.push((DownloadTest {}).run(1000));
-    }
+    writeln!(
+        stdout,
+        "{} {} {}",
+        "Server Location:".bold().white(),
+        location.city.bright_blue(),
+        format!("({})", location.iata).bright_blue()
+    )?;
 
-    let futures = tests.into_iter().map(|test| async move { test.await });
+    writeln!(
+        stdout,
+        "{} {} {}",
+        "Your network:\t".bold().white(),
+        meta.as_organization.bright_blue(),
+        format!("(AS{})", meta.asn).bright_blue()
+    )?;
 
-    let results: Result<Vec<_>, _> =
-        join_all(futures).await.into_iter().collect();
+    writeln!(
+        stdout,
+        "{} {} {}",
+        "Your IP:\t".bold().white(),
+        meta.client_ip.bright_blue(),
+        format!("({})", meta.country).bright_blue()
+    )?;
 
-    let results = match results {
-        Ok(results) => results,
-        Err(error) => panic!("{:?}", error),
+    Ok(())
+}
+
+/// Print results in JSON format.
+fn print_json_output(
+    results: &SpeedTestResults,
+    pretty: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdout = io::stdout().lock();
+
+    let json = if pretty {
+        serde_json::to_string_pretty(results)?
+    } else {
+        serde_json::to_string(results)?
     };
 
-    results
-        .into_iter()
-        .map(|result| {
-            let measurement = result.tcp_duration;
+    writeln!(stdout, "{}", json)?;
 
-            info!("Latency Measurement: {} ms", measurement.as_millis());
-
-            return measurement.as_secs_f64() * 1000.0;
-        })
-        .collect::<Vec<f64>>()
+    Ok(())
 }
 
-//          0           1       2               3           4       5       6
-// resolve([started, dnsLookup, tcpHandshake, sslHandshake, ttfb, ended, parseFloat(res.headers["server-timing"].slice(22))]);
-async fn measure_download(bytes: u64, iterations: usize) -> Vec<f64> {
-    let mut tests: Vec<_> = Vec::with_capacity(iterations);
+/// Print results in human-readable format.
+fn print_human_output(
+    latency: &LatencyResults,
+    download: &BandwidthResults,
+    upload: &BandwidthResults,
+    packet_loss: &Option<PacketLossResults>,
+    aim_scores: &crate::scoring::AimScores,
+) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
 
-    for _ in 0..tests.capacity() {
-        tests.push((DownloadTest {}).run(bytes));
+    // Latency section
+    writeln!(
+        stdout,
+        "{} {}",
+        "Latency:\t".bold().white(),
+        format!("{:.2} ms", latency.idle_ms).bright_red()
+    )?;
+
+    writeln!(
+        stdout,
+        "{} {}",
+        "Jitter:\t\t".bold().white(),
+        match latency.idle_jitter_ms {
+            Some(j) => format!("{:.2} ms", j).bright_red(),
+            None => "N/A".bright_red(),
+        }
+    )?;
+
+    // Loaded latency (if available)
+    if let Some(loaded_down) = latency.loaded_down_ms {
+        writeln!(
+            stdout,
+            "{} {}",
+            "Loaded (down):\t".bold().white(),
+            format!("{:.2} ms", loaded_down).bright_red()
+        )?;
     }
 
-    let futures = tests.into_iter().map(|test| async move { test.await });
-
-    let results: Result<Vec<_>, _> =
-        join_all(futures).await.into_iter().collect();
-
-    let results = match results {
-        Ok(results) => results,
-        Err(error) => panic!("{:?}", error),
-    };
-
-    results
-        .into_iter()
-        .map(|result| {
-            info!("{:#?}", result);
-            let measurement = result.end_duration - result.ttfb_duration;
-
-            info!("Download duration: {} ms", measurement.as_millis());
-
-            measurement.as_secs_f64() * 1000.0
-        })
-        .collect::<Vec<f64>>()
-}
-
-async fn measure_upload(
-    client: &Client,
-    bytes: usize,
-    iterations: usize,
-) -> Vec<Duration> {
-    let mut uploads = vec![];
-    let upload_request = Upload::new(bytes);
-
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let _ = client.send(&upload_request).await;
-        let measurement = Instant::now().duration_since(start);
-        uploads.push(measurement);
+    if let Some(loaded_up) = latency.loaded_up_ms {
+        writeln!(
+            stdout,
+            "{} {}",
+            "Loaded (up):\t".bold().white(),
+            format!("{:.2} ms", loaded_up).bright_red()
+        )?;
     }
 
-    uploads
+    writeln!(stdout)?;
+
+    // Download speeds by size
+    for measurement in &download.measurements {
+        let size_label = format_size_label(measurement.bytes);
+        writeln!(
+            stdout,
+            "{} {}",
+            format!("{} speed:\t", size_label).bold().white(),
+            format!("{:.2} Mbps", measurement.speed_mbps).yellow()
+        )?;
+    }
+
+    // Final download speed
+    writeln!(
+        stdout,
+        "{} {}",
+        "Download speed:\t".bold().white(),
+        format!("{:.2} Mbps", download.speed_mbps).bright_cyan()
+    )?;
+
+    writeln!(stdout)?;
+
+    // Upload speeds by size
+    for measurement in &upload.measurements {
+        let size_label = format_size_label(measurement.bytes);
+        writeln!(
+            stdout,
+            "{} {}",
+            format!("{} up:\t", size_label).bold().white(),
+            format!("{:.2} Mbps", measurement.speed_mbps).yellow()
+        )?;
+    }
+
+    // Final upload speed
+    writeln!(
+        stdout,
+        "{} {}",
+        "Upload speed:\t".bold().white(),
+        format!("{:.2} Mbps", upload.speed_mbps).bright_cyan()
+    )?;
+
+    writeln!(stdout)?;
+
+    // Packet loss (if available)
+    if let Some(pl) = packet_loss {
+        writeln!(
+            stdout,
+            "{} {}",
+            "Packet loss:\t".bold().white(),
+            format!("{:.2}%", pl.percent).bright_magenta()
+        )?;
+        writeln!(stdout)?;
+    }
+
+    // AIM Scores
+    writeln!(stdout, "{}", "Quality Scores:".bold().white())?;
+    writeln!(
+        stdout,
+        "  {} {}",
+        "Streaming:\t".white(),
+        format_quality_score(&aim_scores.streaming)
+    )?;
+    writeln!(
+        stdout,
+        "  {} {}",
+        "Gaming:\t\t".white(),
+        format_quality_score(&aim_scores.gaming)
+    )?;
+    writeln!(
+        stdout,
+        "  {} {}",
+        "Video Calls:\t".white(),
+        format_quality_score(&aim_scores.video_conferencing)
+    )?;
+
+    Ok(())
 }
 
-fn measure_speed(bytes: f64, duration: f64) -> f64 {
-    (bytes * 8.0) / (duration / 1000.0) / 1e6
+/// Format a byte size into a human-readable label.
+fn format_size_label(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1_000_000_000 => format!("{}GB", b / 1_000_000_000),
+        b if b >= 1_000_000 => format!("{}MB", b / 1_000_000),
+        b if b >= 1_000 => format!("{}kB", b / 1_000),
+        b => format!("{}B", b),
+    }
+}
+
+/// Format a quality score with appropriate color.
+fn format_quality_score(score: &QualityScore) -> colored::ColoredString {
+    match score {
+        QualityScore::Great => "Great".bright_green(),
+        QualityScore::Good => "Good".green(),
+        QualityScore::Average => "Average".yellow(),
+        QualityScore::Poor => "Poor".red(),
+    }
 }

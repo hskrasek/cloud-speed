@@ -26,7 +26,7 @@ impl Request for Locations {
 
     type Response = LocationsResponse;
 
-    fn endpoint(&self) -> Cow<str> {
+    fn endpoint(&'_ self) -> Cow<'_, str> {
         "/locations".into()
     }
 }
