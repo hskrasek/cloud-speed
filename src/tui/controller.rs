@@ -28,6 +28,15 @@ use super::renderer::render_frame;
 use super::state::{ConnectionInfo, ServerInfo, TuiState};
 use crate::results::SpeedTestResults;
 
+/// Result of waiting for user input after test completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitResult {
+    /// User wants to exit
+    Exit,
+    /// User wants to retest
+    Retest,
+}
+
 /// Controller for the TUI display.
 pub struct TuiController {
     /// Current display mode
@@ -224,14 +233,16 @@ impl TuiController {
         Ok(())
     }
 
-    /// Wait for user to press 'q' or Esc to exit.
-    /// Returns true if user requested exit, false if interrupted.
+    /// Wait for user to press 'q' or Esc to exit, or 'r' to retest.
+    /// Returns Ok(WaitResult::Exit) if user wants to exit,
+    /// Ok(WaitResult::Retest) if user wants to retest,
+    /// or Err if interrupted.
     pub fn wait_for_exit(
         &mut self,
         shutdown_flag: &std::sync::atomic::AtomicBool,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    ) -> Result<WaitResult, Box<dyn std::error::Error>> {
         if self.mode != DisplayMode::Tui {
-            return Ok(true);
+            return Ok(WaitResult::Exit);
         }
 
         // Set waiting state
@@ -245,7 +256,7 @@ impl TuiController {
         loop {
             // Check for shutdown signal
             if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return Ok(false);
+                return Err("Interrupted".into());
             }
 
             // Poll for events with timeout
@@ -254,7 +265,14 @@ impl TuiController {
                     if key_event.kind == KeyEventKind::Press {
                         match key_event.code {
                             KeyCode::Char('q') | KeyCode::Esc => {
-                                return Ok(true);
+                                return Ok(WaitResult::Exit);
+                            }
+                            KeyCode::Char('r') => {
+                                // Reset state for retest
+                                if let Ok(mut state) = self.state.lock() {
+                                    state.reset_for_retest();
+                                }
+                                return Ok(WaitResult::Retest);
                             }
                             _ => {}
                         }

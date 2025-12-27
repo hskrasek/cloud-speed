@@ -146,19 +146,70 @@ fn render_main_content(frame: &mut Frame, area: Rect, state: &TuiState) {
         return;
     }
 
-    // Layout: top row (speeds), middle row (graphs), bottom row (quality/latency)
+    // Layout: connection info, speeds, graphs, quality/latency
     let content_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(4), // Connection info
             Constraint::Length(5), // Speed displays
             Constraint::Min(6),    // Graphs
             Constraint::Length(6), // Quality scores and latency
         ])
         .split(area);
 
-    render_speed_displays(frame, content_chunks[0], state);
-    render_speed_graphs(frame, content_chunks[1], state);
-    render_bottom_section(frame, content_chunks[2], state);
+    render_connection_info(frame, content_chunks[0], state);
+    render_speed_displays(frame, content_chunks[1], state);
+    render_speed_graphs(frame, content_chunks[2], state);
+    render_bottom_section(frame, content_chunks[3], state);
+}
+
+/// Render connection information section.
+fn render_connection_info(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            " Connection ",
+            Style::default().fg(Color::White),
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+
+    // Server location
+    if let Some(ref server) = state.server {
+        lines.push(Line::from(vec![
+            Span::styled("⚡ Server: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ({})", server.city, server.iata),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+
+    // Network info
+    if let Some(ref conn) = state.connection {
+        lines.push(Line::from(vec![
+            Span::styled("⊙ Network: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} (AS{})", conn.isp, conn.asn),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("⊡ Your IP: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ({})", conn.ip, conn.country),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
 }
 
 /// Render the large speed displays (Download, Upload, Latency, Jitter).
@@ -504,7 +555,7 @@ fn render_latency_details(frame: &mut Frame, area: Rect, state: &TuiState) {
 /// Render the status bar at the bottom.
 pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &TuiState) {
     let status_text = if state.waiting_for_exit {
-        "Press 'q' or Esc to exit"
+        "Press 'r' to retest • 'q' or Esc to exit"
     } else {
         match state.phase {
             TestPhase::Initializing => "Connecting to Cloudflare...",

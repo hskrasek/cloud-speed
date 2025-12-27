@@ -19,15 +19,12 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionInfo {
     /// Client IP address
-    #[allow(dead_code)]
     pub ip: String,
     /// Country code
-    #[allow(dead_code)]
     pub country: String,
     /// ISP name
     pub isp: String,
     /// Autonomous System Number
-    #[allow(dead_code)]
     pub asn: i64,
 }
 
@@ -169,6 +166,8 @@ pub struct TuiState {
     pub waiting_for_exit: bool,
     /// Timestamp when test started (for graph x-axis)
     pub test_start_time: std::time::Instant,
+    /// Whether a retest has been requested
+    pub retest_requested: bool,
 }
 
 impl Default for TuiState {
@@ -186,6 +185,7 @@ impl Default for TuiState {
             terminal_height: 24,
             waiting_for_exit: false,
             test_start_time: std::time::Instant::now(),
+            retest_requested: false,
         }
     }
 }
@@ -600,5 +600,20 @@ mod tests {
                 upload_measurement_before
             );
         }
+    }
+}
+
+impl TuiState {
+    /// Reset state for a retest, preserving server/connection info.
+    pub fn reset_for_retest(&mut self) {
+        self.phase = TestPhase::Initializing;
+        self.latency = LatencyState::default();
+        self.download = BandwidthState::default();
+        self.upload = BandwidthState::default();
+        self.quality_scores = QualityScores::default();
+        self.error = None;
+        self.waiting_for_exit = false;
+        self.test_start_time = std::time::Instant::now();
+        self.retest_requested = false;
     }
 }

@@ -103,10 +103,17 @@ async fn main() {
     let shutdown_flag_clone = Arc::clone(&shutdown_flag);
     let signal_handler = setup_signal_handler(shutdown_flag_clone);
 
-    let exit_code =
+    // Run speed test with retest loop support
+    let exit_code = loop {
         match run_speed_test_with_tui(&cli, &mut tui, &shutdown_flag).await {
-            Ok(()) => exit_codes::SUCCESS,
+            Ok(()) => break exit_codes::SUCCESS,
             Err(e) => {
+                // Check if this is a retest request
+                if e.to_string() == "__RETEST__" {
+                    // Continue the loop to run another test
+                    continue;
+                }
+
                 // Check if this was a user-initiated shutdown
                 if shutdown_flag.load(Ordering::Relaxed) {
                     // User pressed Ctrl+C, clean up gracefully
@@ -114,7 +121,7 @@ async fn main() {
                     let partial_results = tui.get_partial_results();
                     let _ = tui.cleanup();
                     print_interrupted_message(cli.json, partial_results);
-                    exit_codes::INTERRUPTED
+                    break exit_codes::INTERRUPTED;
                 } else {
                     let error = create_user_error(e.as_ref());
 
@@ -137,10 +144,11 @@ async fn main() {
                     // Clean up TUI before printing error to terminal
                     let _ = tui.cleanup();
                     print_error(&error, cli.json);
-                    error.exit_code()
+                    break error.exit_code();
                 }
             }
-        };
+        }
+    };
 
     // Clean up TUI (restores terminal state)
     let _ = tui.cleanup();
@@ -646,18 +654,24 @@ async fn run_speed_test_with_tui(
             // Show final results in TUI
             tui.show_results(&results)?;
 
-            // Wait for user to press 'q' or Esc to exit
-            let _ = tui.wait_for_exit(shutdown_flag);
-
-            tui.cleanup()?;
-            // Print human-readable summary after TUI cleanup
-            print_human_output(
-                &latency,
-                &download,
-                &upload,
-                &packet_loss,
-                &aim_scores,
-            )?;
+            // Wait for user input - they can exit or request retest
+            match tui.wait_for_exit(shutdown_flag)? {
+                crate::tui::WaitResult::Retest => {
+                    // Don't cleanup - return special error to trigger retest
+                    return Err("__RETEST__".into());
+                }
+                crate::tui::WaitResult::Exit => {
+                    tui.cleanup()?;
+                    // Print human-readable summary after TUI cleanup
+                    print_human_output(
+                        &latency,
+                        &download,
+                        &upload,
+                        &packet_loss,
+                        &aim_scores,
+                    )?;
+                }
+            }
         }
         DisplayMode::Silent => {
             // Silent mode: just print human-readable output
