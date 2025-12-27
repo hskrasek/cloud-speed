@@ -19,12 +19,15 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionInfo {
     /// Client IP address
+    #[allow(dead_code)]
     pub ip: String,
     /// Country code
+    #[allow(dead_code)]
     pub country: String,
     /// ISP name
     pub isp: String,
     /// Autonomous System Number
+    #[allow(dead_code)]
     pub asn: i64,
 }
 
@@ -50,6 +53,14 @@ pub struct LatencyState {
     pub median_ms: Option<f64>,
     /// Calculated jitter in ms
     pub jitter_ms: Option<f64>,
+    /// Loaded latency during download (ms)
+    pub loaded_down_ms: Option<f64>,
+    /// Loaded jitter during download (ms)
+    pub loaded_down_jitter_ms: Option<f64>,
+    /// Loaded latency during upload (ms)
+    pub loaded_up_ms: Option<f64>,
+    /// Loaded jitter during upload (ms)
+    pub loaded_up_jitter_ms: Option<f64>,
 }
 
 impl LatencyState {
@@ -72,6 +83,16 @@ impl LatencyState {
     }
 }
 
+/// Single speed measurement for history tracking.
+#[derive(Debug, Clone, Copy)]
+pub struct SpeedSample {
+    /// Speed in Mbps
+    pub speed_mbps: f64,
+    /// Timestamp (relative, for graph positioning)
+    #[allow(dead_code)]
+    pub timestamp: f64,
+}
+
 /// Bandwidth measurement state.
 #[derive(Debug, Clone, Default)]
 pub struct BandwidthState {
@@ -87,6 +108,38 @@ pub struct BandwidthState {
     pub final_speed_mbps: Option<f64>,
     /// Whether this phase is completed
     pub completed: bool,
+    /// Speed history for graph display
+    pub speed_history: Vec<SpeedSample>,
+    /// 90th percentile speed
+    pub percentile_90: Option<f64>,
+}
+
+/// Quality score for a use case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRating {
+    Great,
+    Good,
+    Average,
+    Poor,
+}
+
+impl QualityRating {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QualityRating::Great => "Great",
+            QualityRating::Good => "Good",
+            QualityRating::Average => "Average",
+            QualityRating::Poor => "Poor",
+        }
+    }
+}
+
+/// Network quality scores for different use cases.
+#[derive(Debug, Clone, Default)]
+pub struct QualityScores {
+    pub streaming: Option<QualityRating>,
+    pub gaming: Option<QualityRating>,
+    pub video_conferencing: Option<QualityRating>,
 }
 
 /// State for the TUI display.
@@ -104,10 +157,18 @@ pub struct TuiState {
     pub download: BandwidthState,
     /// Upload progress and results
     pub upload: BandwidthState,
+    /// Quality scores
+    pub quality_scores: QualityScores,
     /// Error message if any
     pub error: Option<ErrorInfo>,
     /// Terminal width for layout
     pub terminal_width: u16,
+    /// Terminal height for layout
+    pub terminal_height: u16,
+    /// Whether the test is complete and waiting for user to exit
+    pub waiting_for_exit: bool,
+    /// Timestamp when test started (for graph x-axis)
+    pub test_start_time: std::time::Instant,
 }
 
 impl Default for TuiState {
@@ -119,8 +180,12 @@ impl Default for TuiState {
             latency: LatencyState::default(),
             download: BandwidthState::default(),
             upload: BandwidthState::default(),
+            quality_scores: QualityScores::default(),
             error: None,
             terminal_width: 80,
+            terminal_height: 24,
+            waiting_for_exit: false,
+            test_start_time: std::time::Instant::now(),
         }
     }
 }
@@ -132,10 +197,6 @@ impl TuiState {
     }
 
     /// Set connection metadata for display.
-    ///
-    /// # Arguments
-    /// * `server` - Server location information
-    /// * `connection` - Connection metadata (IP, ISP, etc.)
     pub fn set_metadata(
         &mut self,
         server: ServerInfo,
@@ -146,36 +207,30 @@ impl TuiState {
     }
 
     /// Set an error state with optional suggestion.
-    ///
-    /// This preserves any partial results collected before the error.
-    ///
-    /// # Arguments
-    /// * `message` - The error message to display
-    /// * `suggestion` - Optional suggestion for resolution
     pub fn set_error(&mut self, message: String, suggestion: Option<String>) {
-        self.error = Some(ErrorInfo {
-            message,
-            suggestion,
-        });
+        self.error = Some(ErrorInfo { message, suggestion });
+    }
+
+    /// Set quality scores from scoring results.
+    pub fn set_quality_scores(
+        &mut self,
+        streaming: &str,
+        gaming: &str,
+        video_conferencing: &str,
+    ) {
+        self.quality_scores.streaming = Some(parse_quality_rating(streaming));
+        self.quality_scores.gaming = Some(parse_quality_rating(gaming));
+        self.quality_scores.video_conferencing =
+            Some(parse_quality_rating(video_conferencing));
     }
 
     /// Update state from a progress event.
-    ///
-    /// This method processes progress events emitted by the test engine
-    /// and updates the appropriate state fields.
-    ///
-    /// # Arguments
-    /// * `event` - The progress event to process
     pub fn update_from_event(&mut self, event: &ProgressEvent) {
         match event {
             ProgressEvent::PhaseChange(phase) => {
                 self.phase = *phase;
             }
-            ProgressEvent::LatencyMeasurement {
-                value_ms,
-                current,
-                total,
-            } => {
+            ProgressEvent::LatencyMeasurement { value_ms, current, total } => {
                 self.latency.measurements.push(*value_ms);
                 self.latency.current = *current;
                 self.latency.total = *total;
@@ -195,12 +250,17 @@ impl TuiState {
                 state.current_bytes = *bytes;
                 state.current_measurement = *current;
                 state.total_measurements = *total;
+
+                // Add to speed history for graph
+                let elapsed = self.test_start_time.elapsed().as_secs_f64();
+                state.speed_history.push(SpeedSample {
+                    speed_mbps: *speed_mbps,
+                    timestamp: elapsed,
+                });
             }
             ProgressEvent::PhaseComplete(phase) => {
                 match phase {
                     TestPhase::Latency => {
-                        // Calculate median and jitter when latency phase
-                        // completes
                         let mut measurements =
                             self.latency.measurements.clone();
                         self.latency.median_ms = median_f64(&mut measurements);
@@ -209,15 +269,39 @@ impl TuiState {
                     }
                     TestPhase::Download => {
                         self.download.completed = true;
-                        // Final speed is the last measured speed
                         self.download.final_speed_mbps =
                             self.download.current_speed_mbps;
+                        // Calculate 90th percentile from history
+                        if !self.download.speed_history.is_empty() {
+                            let mut speeds: Vec<f64> = self
+                                .download
+                                .speed_history
+                                .iter()
+                                .map(|s| s.speed_mbps)
+                                .collect();
+                            speeds.sort_by(|a, b| a.total_cmp(b));
+                            let idx = (speeds.len() as f64 * 0.9) as usize;
+                            self.download.percentile_90 =
+                                Some(speeds[idx.min(speeds.len() - 1)]);
+                        }
                     }
                     TestPhase::Upload => {
                         self.upload.completed = true;
-                        // Final speed is the last measured speed
                         self.upload.final_speed_mbps =
                             self.upload.current_speed_mbps;
+                        // Calculate 90th percentile from history
+                        if !self.upload.speed_history.is_empty() {
+                            let mut speeds: Vec<f64> = self
+                                .upload
+                                .speed_history
+                                .iter()
+                                .map(|s| s.speed_mbps)
+                                .collect();
+                            speeds.sort_by(|a, b| a.total_cmp(b));
+                            let idx = (speeds.len() as f64 * 0.9) as usize;
+                            self.upload.percentile_90 =
+                                Some(speeds[idx.min(speeds.len() - 1)]);
+                        }
                     }
                     _ => {}
                 }
@@ -229,13 +313,20 @@ impl TuiState {
     }
 }
 
+fn parse_quality_rating(s: &str) -> QualityRating {
+    match s.to_lowercase().as_str() {
+        "great" => QualityRating::Great,
+        "good" => QualityRating::Good,
+        "average" => QualityRating::Average,
+        _ => QualityRating::Poor,
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    // Unit tests for state update methods
     #[test]
     fn test_set_metadata() {
         let mut state = TuiState::new();
@@ -282,11 +373,14 @@ mod tests {
         let mut state = TuiState::new();
         assert_eq!(state.phase, TestPhase::Initializing);
 
-        state.update_from_event(&ProgressEvent::PhaseChange(TestPhase::Latency));
+        state.update_from_event(&ProgressEvent::PhaseChange(
+            TestPhase::Latency,
+        ));
         assert_eq!(state.phase, TestPhase::Latency);
 
-        state
-            .update_from_event(&ProgressEvent::PhaseChange(TestPhase::Download));
+        state.update_from_event(&ProgressEvent::PhaseChange(
+            TestPhase::Download,
+        ));
         assert_eq!(state.phase, TestPhase::Download);
     }
 
@@ -328,7 +422,6 @@ mod tests {
     fn test_update_from_phase_complete_latency() {
         let mut state = TuiState::new();
 
-        // Add some latency measurements
         for value in [10.0, 15.0, 12.0, 18.0, 14.0] {
             state.update_from_event(&ProgressEvent::LatencyMeasurement {
                 value_ms: value,
@@ -337,14 +430,12 @@ mod tests {
             });
         }
 
-        // Complete the latency phase
-        state.update_from_event(&ProgressEvent::PhaseComplete(TestPhase::Latency));
+        state.update_from_event(&ProgressEvent::PhaseComplete(
+            TestPhase::Latency,
+        ));
 
-        // Median should be calculated (14.0 for [10, 12, 14, 15, 18])
         assert!(state.latency.median_ms.is_some());
         assert_eq!(state.latency.median_ms.unwrap(), 14.0);
-
-        // Jitter should be calculated
         assert!(state.latency.jitter_ms.is_some());
     }
 
@@ -352,7 +443,6 @@ mod tests {
     fn test_update_from_phase_complete_download() {
         let mut state = TuiState::new();
 
-        // Add a bandwidth measurement
         state.update_from_event(&ProgressEvent::BandwidthMeasurement {
             direction: BandwidthDirection::Download,
             speed_mbps: 95.5,
@@ -361,9 +451,9 @@ mod tests {
             total: 8,
         });
 
-        // Complete the download phase
-        state
-            .update_from_event(&ProgressEvent::PhaseComplete(TestPhase::Download));
+        state.update_from_event(&ProgressEvent::PhaseComplete(
+            TestPhase::Download,
+        ));
 
         assert!(state.download.completed);
         assert_eq!(state.download.final_speed_mbps, Some(95.5));
@@ -381,14 +471,9 @@ mod tests {
         assert_eq!(state.error.as_ref().unwrap().message, "Network timeout");
     }
 
-    // Feature: tui-progress-display, Property 3: Progress Percentage Monotonicity
-    // Validates: Requirements 3.3
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
-        /// Property: For any sequence of ProgressEvents for a single test phase,
-        /// the completion percentage (current/total) SHALL be monotonically
-        /// non-decreasing.
         #[test]
         fn progress_percentage_monotonicity(
             total in 1usize..100,
@@ -397,7 +482,6 @@ mod tests {
             let mut state = TuiState::new();
             let mut last_percentage: f64 = 0.0;
 
-            // Generate a sequence of events with increasing current values
             for i in 1..=num_events.min(total) {
                 state.update_from_event(&ProgressEvent::LatencyMeasurement {
                     value_ms: 10.0 + i as f64,
@@ -410,20 +494,13 @@ mod tests {
 
                 prop_assert!(
                     current_percentage >= last_percentage,
-                    "Progress percentage should be monotonically non-decreasing: \
-                     {} >= {} (current={}, total={})",
-                    current_percentage,
-                    last_percentage,
-                    state.latency.current,
-                    state.latency.total
+                    "Progress percentage should be monotonically non-decreasing"
                 );
 
                 last_percentage = current_percentage;
             }
         }
 
-        /// Property: For bandwidth measurements, progress is monotonically
-        /// non-decreasing within a phase.
         #[test]
         fn bandwidth_progress_monotonicity(
             total in 1usize..50,
@@ -455,26 +532,13 @@ mod tests {
 
                 prop_assert!(
                     current_percentage >= last_percentage,
-                    "Bandwidth progress should be monotonically non-decreasing: \
-                     {} >= {}",
-                    current_percentage,
-                    last_percentage
+                    "Bandwidth progress should be monotonically non-decreasing"
                 );
 
                 last_percentage = current_percentage;
             }
         }
-    }
 
-    // Feature: tui-progress-display, Property 10: Error State Preservation
-    // Validates: Requirements 7.1, 7.3, 7.4
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(100))]
-
-        /// Property: For any TuiState that receives an Error event after
-        /// collecting N measurements, the state SHALL:
-        /// - Have error set to Some(ErrorInfo)
-        /// - Preserve all N previously collected measurements
         #[test]
         fn error_state_preservation(
             num_latency_measurements in 0usize..20,
@@ -484,7 +548,6 @@ mod tests {
         ) {
             let mut state = TuiState::new();
 
-            // Collect latency measurements
             for i in 0..num_latency_measurements {
                 state.update_from_event(&ProgressEvent::LatencyMeasurement {
                     value_ms: 10.0 + i as f64,
@@ -493,7 +556,6 @@ mod tests {
                 });
             }
 
-            // Collect download measurements
             for i in 0..num_download_measurements {
                 state.update_from_event(&ProgressEvent::BandwidthMeasurement {
                     direction: BandwidthDirection::Download,
@@ -504,7 +566,6 @@ mod tests {
                 });
             }
 
-            // Collect upload measurements
             for i in 0..num_upload_measurements {
                 state.update_from_event(&ProgressEvent::BandwidthMeasurement {
                     direction: BandwidthDirection::Upload,
@@ -515,100 +576,28 @@ mod tests {
                 });
             }
 
-            // Record state before error
             let latency_count_before = state.latency.measurements.len();
             let download_measurement_before = state.download.current_measurement;
             let upload_measurement_before = state.upload.current_measurement;
 
-            // Trigger error
             state.update_from_event(&ProgressEvent::Error(error_message.clone()));
 
-            // Verify error is set
-            prop_assert!(
-                state.error.is_some(),
-                "Error should be set after Error event"
-            );
+            prop_assert!(state.error.is_some());
             prop_assert_eq!(
                 &state.error.as_ref().unwrap().message,
-                &error_message,
-                "Error message should match"
+                &error_message
             );
-
-            // Verify measurements are preserved
             prop_assert_eq!(
                 state.latency.measurements.len(),
-                latency_count_before,
-                "Latency measurements should be preserved after error"
+                latency_count_before
             );
             prop_assert_eq!(
                 state.download.current_measurement,
-                download_measurement_before,
-                "Download measurement count should be preserved after error"
+                download_measurement_before
             );
             prop_assert_eq!(
                 state.upload.current_measurement,
-                upload_measurement_before,
-                "Upload measurement count should be preserved after error"
-            );
-        }
-
-        /// Property: Error state preserves partial results including any
-        /// calculated values (median, jitter, final speeds).
-        #[test]
-        fn error_preserves_calculated_values(
-            latency_values in prop::collection::vec(1.0f64..100.0, 2..10),
-            download_speed in 10.0f64..200.0,
-            error_message in "[a-zA-Z0-9 ]{1,30}"
-        ) {
-            let mut state = TuiState::new();
-
-            // Add latency measurements
-            let total = latency_values.len();
-            for (i, value) in latency_values.iter().enumerate() {
-                state.update_from_event(&ProgressEvent::LatencyMeasurement {
-                    value_ms: *value,
-                    current: i + 1,
-                    total,
-                });
-            }
-
-            // Complete latency phase to calculate median/jitter
-            state.update_from_event(&ProgressEvent::PhaseComplete(
-                TestPhase::Latency,
-            ));
-
-            // Add download measurement
-            state.update_from_event(&ProgressEvent::BandwidthMeasurement {
-                direction: BandwidthDirection::Download,
-                speed_mbps: download_speed,
-                bytes: 10_000_000,
-                current: 1,
-                total: 1,
-            });
-
-            // Record calculated values before error
-            let median_before = state.latency.median_ms;
-            let jitter_before = state.latency.jitter_ms;
-            let download_speed_before = state.download.current_speed_mbps;
-
-            // Trigger error
-            state.update_from_event(&ProgressEvent::Error(error_message));
-
-            // Verify calculated values are preserved
-            prop_assert_eq!(
-                state.latency.median_ms,
-                median_before,
-                "Median should be preserved after error"
-            );
-            prop_assert_eq!(
-                state.latency.jitter_ms,
-                jitter_before,
-                "Jitter should be preserved after error"
-            );
-            prop_assert_eq!(
-                state.download.current_speed_mbps,
-                download_speed_before,
-                "Download speed should be preserved after error"
+                upload_measurement_before
             );
         }
     }

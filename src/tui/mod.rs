@@ -13,4 +13,6 @@ pub mod state;
 pub use controller::PartialResults;
 pub use controller::TuiController;
 pub use display_mode::DisplayMode;
-pub use progress::{BandwidthDirection, ProgressCallback, ProgressEvent, TestPhase};
+pub use progress::{
+    BandwidthDirection, ProgressCallback, ProgressEvent, TestPhase,
+};

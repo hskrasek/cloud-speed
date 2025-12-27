@@ -7,7 +7,9 @@ use crate::measurements::{
 };
 use crate::retry::{retry_async, RetryConfig, RetryResult};
 use crate::stats::{median_f64, percentile_f64};
-use crate::tui::{BandwidthDirection, ProgressCallback, ProgressEvent, TestPhase};
+use crate::tui::{
+    BandwidthDirection, ProgressCallback, ProgressEvent, TestPhase,
+};
 use log::{debug, info, warn};
 use std::error::Error;
 use std::sync::Arc;
@@ -235,7 +237,9 @@ impl TestEngine {
         info!("Starting speed test sequence");
 
         // Emit initializing phase
-        self.emit_progress(ProgressEvent::PhaseChange(TestPhase::Initializing));
+        self.emit_progress(ProgressEvent::PhaseChange(
+            TestPhase::Initializing,
+        ));
 
         // Step 1: Initial latency estimation (1 packet)
         debug!("Running initial latency estimation");
@@ -254,8 +258,9 @@ impl TestEngine {
         // Emit latency phase
         self.emit_progress(ProgressEvent::PhaseChange(TestPhase::Latency));
 
-        let idle_latencies =
-            self.run_latency_internal(self.config.latency_packets, true).await?;
+        let idle_latencies = self
+            .run_latency_internal(self.config.latency_packets, true)
+            .await?;
 
         let idle_ms = latency_f64(&idle_latencies).await;
         let idle_jitter_ms = jitter_f64(&idle_latencies).await;
@@ -347,18 +352,10 @@ impl TestEngine {
         let mut upload_phase_started = false;
 
         // Calculate total measurements for progress tracking
-        let total_download_measurements: usize = self
-            .config
-            .download_sizes
-            .iter()
-            .map(|b| b.count)
-            .sum();
-        let total_upload_measurements: usize = self
-            .config
-            .upload_sizes
-            .iter()
-            .map(|b| b.count)
-            .sum();
+        let total_download_measurements: usize =
+            self.config.download_sizes.iter().map(|b| b.count).sum();
+        let total_upload_measurements: usize =
+            self.config.upload_sizes.iter().map(|b| b.count).sum();
         let mut download_measurement_count = 0usize;
         let mut upload_measurement_count = 0usize;
 
@@ -490,10 +487,14 @@ impl TestEngine {
         // Emit phase complete events for any phases that were started
         // but not yet completed (handles case where upload didn't start)
         if download_phase_started && !upload_phase_started {
-            self.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Download));
+            self.emit_progress(ProgressEvent::PhaseComplete(
+                TestPhase::Download,
+            ));
         }
         if upload_phase_started {
-            self.emit_progress(ProgressEvent::PhaseComplete(TestPhase::Upload));
+            self.emit_progress(ProgressEvent::PhaseComplete(
+                TestPhase::Upload,
+            ));
         }
 
         // Calculate final speeds using 90th percentile of all measurements
@@ -611,11 +612,13 @@ impl TestEngine {
 
                     // Emit progress event if enabled
                     if emit_events {
-                        self.emit_progress(ProgressEvent::LatencyMeasurement {
-                            value_ms: latency_ms,
-                            current: i + 1,
-                            total: num_packets,
-                        });
+                        self.emit_progress(
+                            ProgressEvent::LatencyMeasurement {
+                                value_ms: latency_ms,
+                                current: i + 1,
+                                total: num_packets,
+                            },
+                        );
                     }
                 }
                 RetryResult::Failed { last_error, attempts } => {
@@ -913,7 +916,8 @@ impl TestEngine {
                 RetryResult::Success(test_result) => {
                     let measurement = test_result.to_bandwidth_measurement();
                     let duration_ms = measurement.duration_ms;
-                    let speed_mbps = calculate_speed_mbps(measurement.bandwidth_bps);
+                    let speed_mbps =
+                        calculate_speed_mbps(measurement.bandwidth_bps);
 
                     measurements.push(measurement);
                     *measurement_count += 1;
@@ -934,7 +938,8 @@ impl TestEngine {
                         debug!(
                             "Duration {:.2}ms >= threshold {:.2}ms, \
                              triggering early termination",
-                            duration_ms, self.config.bandwidth_finish_duration_ms
+                            duration_ms,
+                            self.config.bandwidth_finish_duration_ms
                         );
                     }
                 }
@@ -1434,7 +1439,10 @@ mod tests {
             },
         ];
         assert_eq!(
-            count_bandwidth_measurements(&events, BandwidthDirection::Download),
+            count_bandwidth_measurements(
+                &events,
+                BandwidthDirection::Download
+            ),
             2
         );
         assert_eq!(

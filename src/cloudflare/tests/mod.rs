@@ -74,7 +74,13 @@ impl TestResults {
         end_duration: Duration,
         bytes: u64,
     ) -> Self {
-        TestResults { tcp_duration, ttfb_duration, server_time, end_duration, bytes }
+        TestResults {
+            tcp_duration,
+            ttfb_duration,
+            server_time,
+            end_duration,
+            bytes,
+        }
     }
 
     /// Calculate the transfer duration (time to download/upload data).

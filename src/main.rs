@@ -64,9 +64,7 @@ struct Cli {
 impl Cli {
     /// Get the packet loss configuration if TURN server is provided.
     fn packet_loss_config(&self) -> Option<PacketLossConfig> {
-        self.turn_server
-            .as_ref()
-            .map(|uri| PacketLossConfig::new(uri.clone()))
+        self.turn_server.as_ref().map(|uri| PacketLossConfig::new(uri.clone()))
     }
 }
 
@@ -130,8 +128,10 @@ async fn main() {
                         // Render the error in TUI
                         let _ = tui.render();
                         // Wait a moment for user to see the error
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2))
-                            .await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            2,
+                        ))
+                        .await;
                     }
 
                     // Clean up TUI before printing error to terminal
@@ -172,9 +172,10 @@ fn setup_signal_handler(
         // Wait for SIGINT (Ctrl+C)
         #[cfg(unix)]
         {
-            let mut sigint =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                    .expect("Failed to set up SIGINT handler");
+            let mut sigint = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::interrupt(),
+            )
+            .expect("Failed to set up SIGINT handler");
             sigint.recv().await;
         }
 
@@ -522,7 +523,8 @@ async fn run_speed_test_with_tui(
     let progress_callback = tui.progress_callback();
 
     // Run the test engine with progress callback
-    let engine = TestEngine::new(TestConfig::default(), Some(progress_callback));
+    let engine =
+        TestEngine::new(TestConfig::default(), Some(progress_callback));
 
     // Create a render loop that updates the TUI during test execution
     let output =
@@ -610,6 +612,19 @@ async fn run_speed_test_with_tui(
     let aim_scores = calculate_aim_scores(&metrics);
     let scores = AimScoresOutput::from_aim_scores(&aim_scores);
 
+    // Set quality scores and loaded latency in TUI before creating results
+    tui.set_quality_scores(
+        &scores.streaming,
+        &scores.gaming,
+        &scores.video_conferencing,
+    );
+    tui.set_loaded_latency(
+        latency.loaded_down_ms,
+        latency.loaded_down_jitter_ms,
+        latency.loaded_up_ms,
+        latency.loaded_up_jitter_ms,
+    );
+
     let results = SpeedTestResults::new(
         server,
         connection,
@@ -630,8 +645,10 @@ async fn run_speed_test_with_tui(
         DisplayMode::Tui => {
             // Show final results in TUI
             tui.show_results(&results)?;
-            // Wait a moment for user to see results, then clean up
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Wait for user to press 'q' or Esc to exit
+            let _ = tui.wait_for_exit(shutdown_flag);
+
             tui.cleanup()?;
             // Print human-readable summary after TUI cleanup
             print_human_output(
@@ -677,8 +694,10 @@ async fn run_test_with_render_loop(
     engine: &TestEngine,
     tui: &mut TuiController,
     shutdown_flag: Arc<AtomicBool>,
-) -> Result<crate::cloudflare::tests::engine::SpeedTestOutput, Box<dyn std::error::Error>>
-{
+) -> Result<
+    crate::cloudflare::tests::engine::SpeedTestOutput,
+    Box<dyn std::error::Error>,
+> {
     use tokio::select;
     use tokio::time::{interval, Duration};
 
@@ -914,7 +933,6 @@ fn format_quality_score(score: &QualityScore) -> colored::ColoredString {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,24 +945,16 @@ mod tests {
         latency_ms: f64,
         jitter_ms: Option<f64>,
     ) -> SpeedTestResults {
-        let server = ServerLocation::new(
-            "Test City".to_string(),
-            "TST".to_string(),
-        );
+        let server =
+            ServerLocation::new("Test City".to_string(), "TST".to_string());
         let connection = ConnectionMeta::new(
             "192.168.1.1".to_string(),
             "US".to_string(),
             "Test ISP".to_string(),
             12345,
         );
-        let latency = LatencyResults::new(
-            latency_ms,
-            jitter_ms,
-            None,
-            None,
-            None,
-            None,
-        );
+        let latency =
+            LatencyResults::new(latency_ms, jitter_ms, None, None, None, None);
         let download = BandwidthResults::new(download_speed, vec![], false);
         let upload = BandwidthResults::new(upload_speed, vec![], false);
         let scores = AimScoresOutput {
@@ -955,13 +965,7 @@ mod tests {
         };
 
         SpeedTestResults::new(
-            server,
-            connection,
-            latency,
-            download,
-            upload,
-            None,
-            scores,
+            server, connection, latency, download, upload, None, scores,
         )
     }
 
@@ -975,7 +979,7 @@ mod tests {
         s.contains("\x1b(") || // Character set selection
         s.contains("\x1b)") || // Character set selection
         s.contains("\x1b*") || // Character set selection
-        s.contains("\x1b+")    // Character set selection
+        s.contains("\x1b+") // Character set selection
     }
 
     // **Feature: tui-progress-display, Property 13: JSON Mode Output Correctness**
