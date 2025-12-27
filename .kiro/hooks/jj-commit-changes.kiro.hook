@@ -1,13 +1,13 @@
 {
   "enabled": true,
   "name": "Jujutsu Commit on Task Completion",
-  "description": "Automatically commits changes using Jujutsu (jj) with a descriptive commit message when the agent stops after completing a task from a specification.",
+  "description": "Automatically commits changes using Jujutsu (jj) with a descriptive commit message when the agent stops after completing a task.",
   "version": "1",
   "when": {
     "type": "agentStop"
   },
   "then": {
-    "type": "runCommand",
-    "command": "jj commit -m \"$(jj diff --summary | head -5 | tr '\\n' ' ')\""
+    "type": "sendMessage",
+    "message": "Review the changes made in this session using `jj diff` and commit them with `jj commit -m \"<descriptive message>\"`. Write a concise, meaningful commit message that describes what was accomplished, not just which files changed."
   }
 }

@@ -280,9 +280,13 @@ impl TuiState {
                                 .map(|s| s.speed_mbps)
                                 .collect();
                             speeds.sort_by(|a, b| a.total_cmp(b));
-                            let idx = (speeds.len() as f64 * 0.9) as usize;
-                            self.download.percentile_90 =
-                                Some(speeds[idx.min(speeds.len() - 1)]);
+                            let idx = ((speeds.len() as f64 * 0.9).ceil() as usize)
+                                .saturating_sub(1)
+                                .min(speeds.len() - 1);
+                            self.download.percentile_90 = Some(speeds[idx]);
+                        } else if let Some(speed) = self.download.final_speed_mbps {
+                            // Fallback to final speed if no history
+                            self.download.percentile_90 = Some(speed);
                         }
                     }
                     TestPhase::Upload => {
@@ -298,9 +302,13 @@ impl TuiState {
                                 .map(|s| s.speed_mbps)
                                 .collect();
                             speeds.sort_by(|a, b| a.total_cmp(b));
-                            let idx = (speeds.len() as f64 * 0.9) as usize;
-                            self.upload.percentile_90 =
-                                Some(speeds[idx.min(speeds.len() - 1)]);
+                            let idx = ((speeds.len() as f64 * 0.9).ceil() as usize)
+                                .saturating_sub(1)
+                                .min(speeds.len() - 1);
+                            self.upload.percentile_90 = Some(speeds[idx]);
+                        } else if let Some(speed) = self.upload.final_speed_mbps {
+                            // Fallback to final speed if no history
+                            self.upload.percentile_90 = Some(speed);
                         }
                     }
                     _ => {}

@@ -418,9 +418,15 @@ fn render_speed_graph(
         Sparkline::default().data(&data).style(Style::default().fg(color));
     frame.render_widget(sparkline, graph_chunks[0]);
 
-    // Show 90th percentile label
-    let percentile_text = if let Some(p90) = bandwidth.percentile_90 {
-        format!("90th percentile: {:.1} Mbps", p90)
+    // Show 90th percentile label (only after phase complete)
+    let percentile_text = if bandwidth.completed {
+        if let Some(p90) = bandwidth.percentile_90 {
+            format!("90th percentile: {:.1} Mbps", p90)
+        } else if let Some(speed) = bandwidth.final_speed_mbps {
+            format!("Final: {:.1} Mbps", speed)
+        } else {
+            String::new()
+        }
     } else if let Some(speed) = bandwidth.current_speed_mbps {
         format!("Current: {:.1} Mbps", speed)
     } else {
