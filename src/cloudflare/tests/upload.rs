@@ -259,6 +259,7 @@ fn build_http_post_header(url: &Url, content_length: usize) -> String {
 /// This function performs the HTTP POST request while spawning a background
 /// task that measures latency at regular intervals. Latency measurements
 /// are only included if the request duration exceeds the minimum threshold.
+#[allow(clippy::too_many_arguments)]
 async fn execute_http_post_with_latency(
     tcp: &mut Box<dyn IoReadAndWrite>,
     url: &Url,

@@ -155,21 +155,21 @@ This implementation plan breaks down the TUI progress display feature into incre
     - **Property 13: JSON Mode Output Correctness**
     - **Validates: Requirements 10.1, 10.2, 10.3, 10.4**
 
-- [ ] 12. Implement signal handling
-  - [ ] 12.1 Add SIGINT handler for graceful cleanup
+- [x] 12. Implement signal handling
+  - [x] 12.1 Add SIGINT handler for graceful cleanup
     - Install signal handler using ctrlc crate or crossterm events
     - Trigger TuiController cleanup on SIGINT
     - Print partial results if available
     - _Requirements: 8.2, 8.3_
 
-- [ ] 13. Implement terminal resize handling
-  - [ ] 13.1 Handle terminal resize events
+- [x] 13. Implement terminal resize handling
+  - [x] 13.1 Handle terminal resize events
     - Update terminal_width in TuiState on resize
     - Re-render with new dimensions
     - Switch between normal and minimal mode as needed
     - _Requirements: 8.1, 8.4_
 
-- [ ] 14. Final checkpoint - Full integration testing
+- [x] 14. Final checkpoint - Full integration testing
   - Ensure all tests pass, ask the user if questions arise.
   - Verify TUI displays correctly in interactive terminal
   - Verify JSON mode produces clean output

@@ -18,6 +18,8 @@ pub mod exit_codes {
     pub const CONFIG_ERROR: i32 = 3;
     /// Partial failure (some tests failed but others succeeded).
     pub const PARTIAL_FAILURE: i32 = 4;
+    /// User interrupted the operation (Ctrl+C).
+    pub const INTERRUPTED: i32 = 130;
     /// Unknown/unexpected error.
     pub const UNKNOWN_ERROR: i32 = 99;
 }

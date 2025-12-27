@@ -558,6 +558,7 @@ impl TestEngine {
     ///
     /// # Returns
     /// Vector of latency values in milliseconds
+    #[allow(dead_code)]
     pub async fn run_latency(
         &self,
         num_packets: usize,
@@ -681,6 +682,7 @@ impl TestEngine {
     /// Returns the measurements and whether early termination was triggered.
     /// Individual measurement failures are retried, and if all retries fail,
     /// the measurement is skipped and the test continues with remaining iterations.
+    #[allow(dead_code)]
     async fn run_bandwidth_block(
         &self,
         block: &DataBlock,

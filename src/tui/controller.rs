@@ -6,10 +6,14 @@
 
 use std::io::{self, Stdout};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crossterm::{
     cursor,
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
+        KeyEventKind,
+    },
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
@@ -201,6 +205,9 @@ impl TuiController {
             return Ok(());
         }
 
+        // Handle any pending resize events before rendering
+        self.handle_pending_events()?;
+
         if let Some(ref mut terminal) = self.terminal {
             // Update terminal width in case of resize
             let size = terminal.size()?;
@@ -211,10 +218,10 @@ impl TuiController {
             // Clone state for rendering to avoid holding lock during draw
             let state = {
                 let state_guard = self.state.lock().map_err(|e| {
-                    Box::new(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to lock state: {}", e),
-                    )) as Box<dyn std::error::Error>
+                    Box::new(io::Error::other(format!(
+                        "Failed to lock state: {}",
+                        e
+                    ))) as Box<dyn std::error::Error>
                 })?;
                 state_guard.clone()
             };
@@ -222,6 +229,87 @@ impl TuiController {
             terminal.draw(|frame| {
                 render_frame(frame, &state);
             })?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle pending terminal events (resize, etc.).
+    ///
+    /// This method polls for terminal events without blocking and handles
+    /// resize events by updating the terminal width in state. This allows
+    /// the TUI to adapt to terminal size changes in real-time.
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error if event handling fails.
+    ///
+    /// # Requirements
+    /// _Requirements: 8.1, 8.4_
+    pub fn handle_pending_events(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.mode != DisplayMode::Tui {
+            return Ok(());
+        }
+
+        // Poll for events with zero timeout (non-blocking)
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Resize(width, _height) => {
+                    // Update terminal width in state
+                    if let Ok(mut state) = self.state.lock() {
+                        state.terminal_width = width;
+                    }
+                }
+                Event::Key(key_event) => {
+                    // Handle key events (e.g., Ctrl+C is handled by signal
+                    // handler) Only handle key press events, not release
+                    if key_event.kind == KeyEventKind::Press {
+                        match key_event.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                // User wants to quit - this will be handled
+                                // by the main loop checking shutdown flag
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {
+                    // Ignore other events (mouse, focus, paste, etc.)
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Force a re-render after a resize event.
+    ///
+    /// This method should be called when a resize event is detected to
+    /// immediately update the display with the new dimensions.
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error if re-rendering fails.
+    ///
+    /// # Requirements
+    /// _Requirements: 8.1, 8.4_
+    #[allow(dead_code)]
+    pub fn handle_resize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.mode != DisplayMode::Tui {
+            return Ok(());
+        }
+
+        if let Some(ref mut terminal) = self.terminal {
+            // Get new terminal size
+            let size = terminal.size()?;
+
+            // Update terminal width in state
+            if let Ok(mut state) = self.state.lock() {
+                state.terminal_width = size.width;
+            }
+
+            // Force a re-render with new dimensions
+            self.render()?;
         }
 
         Ok(())
@@ -291,6 +379,72 @@ impl TuiController {
     pub fn state(&self) -> Arc<Mutex<TuiState>> {
         Arc::clone(&self.state)
     }
+
+    /// Get partial results collected so far.
+    ///
+    /// This is useful for printing partial results when the test is
+    /// interrupted by the user.
+    ///
+    /// # Returns
+    /// A summary of partial results, or None if no results are available.
+    pub fn get_partial_results(&self) -> Option<PartialResults> {
+        let state = self.state.lock().ok()?;
+
+        // Only return partial results if we have some data
+        if state.latency.measurements.is_empty()
+            && state.download.current_speed_mbps.is_none()
+            && state.upload.current_speed_mbps.is_none()
+        {
+            return None;
+        }
+
+        Some(PartialResults {
+            server: state.server.clone(),
+            connection: state.connection.clone(),
+            latency_median_ms: state.latency.median_ms,
+            latency_jitter_ms: state.latency.jitter_ms,
+            latency_measurements: state.latency.measurements.len(),
+            download_speed_mbps: state
+                .download
+                .final_speed_mbps
+                .or(state.download.current_speed_mbps),
+            download_completed: state.download.completed,
+            upload_speed_mbps: state
+                .upload
+                .final_speed_mbps
+                .or(state.upload.current_speed_mbps),
+            upload_completed: state.upload.completed,
+            phase: state.phase,
+        })
+    }
+}
+
+/// Partial results collected during an interrupted test.
+#[derive(Debug, Clone)]
+pub struct PartialResults {
+    /// Server location info
+    #[allow(dead_code)]
+    pub server: Option<ServerInfo>,
+    /// Connection metadata
+    #[allow(dead_code)]
+    pub connection: Option<ConnectionInfo>,
+    /// Median latency in ms (if calculated)
+    pub latency_median_ms: Option<f64>,
+    /// Jitter in ms (if calculated)
+    pub latency_jitter_ms: Option<f64>,
+    /// Number of latency measurements collected
+    #[allow(dead_code)]
+    pub latency_measurements: usize,
+    /// Download speed in Mbps (final or current)
+    pub download_speed_mbps: Option<f64>,
+    /// Whether download phase completed
+    pub download_completed: bool,
+    /// Upload speed in Mbps (final or current)
+    pub upload_speed_mbps: Option<f64>,
+    /// Whether upload phase completed
+    pub upload_completed: bool,
+    /// Current test phase when interrupted
+    pub phase: super::progress::TestPhase,
 }
 
 impl Drop for TuiController {
@@ -450,5 +604,77 @@ mod tests {
     fn test_cleanup_noop_when_not_initialized() {
         let mut controller = TuiController::new(DisplayMode::Silent).unwrap();
         assert!(controller.cleanup().is_ok());
+    }
+
+    #[test]
+    fn test_handle_pending_events_noop_for_non_tui_modes() {
+        let mut controller = TuiController::new(DisplayMode::Silent).unwrap();
+        assert!(controller.handle_pending_events().is_ok());
+
+        let mut controller = TuiController::new(DisplayMode::Json).unwrap();
+        assert!(controller.handle_pending_events().is_ok());
+    }
+
+    #[test]
+    fn test_handle_resize_noop_for_non_tui_modes() {
+        let mut controller = TuiController::new(DisplayMode::Silent).unwrap();
+        assert!(controller.handle_resize().is_ok());
+
+        let mut controller = TuiController::new(DisplayMode::Json).unwrap();
+        assert!(controller.handle_resize().is_ok());
+    }
+
+    #[test]
+    fn test_terminal_width_default() {
+        let controller = TuiController::new(DisplayMode::Silent).unwrap();
+        let state = controller.state.lock().unwrap();
+        // Default terminal width should be 80
+        assert_eq!(state.terminal_width, 80);
+    }
+
+    #[test]
+    fn test_terminal_width_can_be_updated() {
+        let controller = TuiController::new(DisplayMode::Silent).unwrap();
+
+        // Manually update terminal width (simulating resize)
+        {
+            let mut state = controller.state.lock().unwrap();
+            state.terminal_width = 120;
+        }
+
+        let state = controller.state.lock().unwrap();
+        assert_eq!(state.terminal_width, 120);
+    }
+
+    #[test]
+    fn test_minimal_mode_triggered_by_narrow_width() {
+        use crate::tui::renderer::is_minimal_mode;
+
+        let controller = TuiController::new(DisplayMode::Silent).unwrap();
+
+        // Set narrow width (below threshold of 60)
+        {
+            let mut state = controller.state.lock().unwrap();
+            state.terminal_width = 50;
+        }
+
+        let state = controller.state.lock().unwrap();
+        assert!(is_minimal_mode(state.terminal_width));
+    }
+
+    #[test]
+    fn test_normal_mode_for_wide_terminal() {
+        use crate::tui::renderer::is_minimal_mode;
+
+        let controller = TuiController::new(DisplayMode::Silent).unwrap();
+
+        // Set wide width (at or above threshold of 60)
+        {
+            let mut state = controller.state.lock().unwrap();
+            state.terminal_width = 80;
+        }
+
+        let state = controller.state.lock().unwrap();
+        assert!(!is_minimal_mode(state.terminal_width));
     }
 }

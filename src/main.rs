@@ -31,6 +31,8 @@ use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
 use std::io::{self, IsTerminal, Write};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -80,6 +82,9 @@ async fn main() {
     let is_tty = io::stdout().is_terminal();
     let display_mode = DisplayMode::detect(cli.json, is_tty);
 
+    // Create shutdown flag for signal handling
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
     // Create TUI controller
     let mut tui = match TuiController::new(display_mode) {
         Ok(tui) => tui,
@@ -96,35 +101,187 @@ async fn main() {
         eprintln!("Warning: TUI init failed: {}", e);
     }
 
-    let exit_code = match run_speed_test_with_tui(&cli, &mut tui).await {
-        Ok(()) => exit_codes::SUCCESS,
-        Err(e) => {
-            let error = create_user_error(e.as_ref());
+    // Set up SIGINT handler for graceful cleanup
+    let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+    let signal_handler = setup_signal_handler(shutdown_flag_clone);
 
-            // In TUI mode, display error in the TUI before cleanup
-            if tui.mode() == DisplayMode::Tui {
-                // Set error state in TUI to display with red styling
-                tui.set_error(
-                    error.message.clone(),
-                    error.suggestion.clone(),
-                );
-                // Render the error in TUI
-                let _ = tui.render();
-                // Wait a moment for user to see the error
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let exit_code =
+        match run_speed_test_with_tui(&cli, &mut tui, &shutdown_flag).await {
+            Ok(()) => exit_codes::SUCCESS,
+            Err(e) => {
+                // Check if this was a user-initiated shutdown
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    // User pressed Ctrl+C, clean up gracefully
+                    // Get partial results before cleanup
+                    let partial_results = tui.get_partial_results();
+                    let _ = tui.cleanup();
+                    print_interrupted_message(cli.json, partial_results);
+                    exit_codes::INTERRUPTED
+                } else {
+                    let error = create_user_error(e.as_ref());
+
+                    // In TUI mode, display error in the TUI before cleanup
+                    if tui.mode() == DisplayMode::Tui {
+                        // Set error state in TUI to display with red styling
+                        tui.set_error(
+                            error.message.clone(),
+                            error.suggestion.clone(),
+                        );
+                        // Render the error in TUI
+                        let _ = tui.render();
+                        // Wait a moment for user to see the error
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2))
+                            .await;
+                    }
+
+                    // Clean up TUI before printing error to terminal
+                    let _ = tui.cleanup();
+                    print_error(&error, cli.json);
+                    error.exit_code()
+                }
             }
-
-            // Clean up TUI before printing error to terminal
-            let _ = tui.cleanup();
-            print_error(&error, cli.json);
-            error.exit_code()
-        }
-    };
+        };
 
     // Clean up TUI (restores terminal state)
     let _ = tui.cleanup();
 
+    // Drop the signal handler
+    drop(signal_handler);
+
     process::exit(exit_code);
+}
+
+/// Set up a signal handler for SIGINT (Ctrl+C).
+///
+/// This function spawns a task that listens for SIGINT and sets the
+/// shutdown flag when received. This allows for graceful cleanup of
+/// the TUI and printing of partial results.
+///
+/// # Arguments
+/// * `shutdown_flag` - An atomic boolean that will be set to true on SIGINT
+///
+/// # Returns
+/// A JoinHandle for the signal handler task.
+///
+/// # Requirements
+/// _Requirements: 8.2, 8.3_
+fn setup_signal_handler(
+    shutdown_flag: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Wait for SIGINT (Ctrl+C)
+        #[cfg(unix)]
+        {
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to set up SIGINT handler");
+            sigint.recv().await;
+        }
+
+        #[cfg(windows)]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to set up Ctrl+C handler");
+        }
+
+        // Set the shutdown flag
+        shutdown_flag.store(true, Ordering::Relaxed);
+    })
+}
+
+/// Print a message indicating the test was interrupted.
+///
+/// If partial results are available, they will be printed as well.
+///
+/// # Arguments
+/// * `json_mode` - Whether to output in JSON format
+/// * `partial_results` - Optional partial results collected before interruption
+fn print_interrupted_message(
+    json_mode: bool,
+    partial_results: Option<crate::tui::PartialResults>,
+) {
+    if json_mode {
+        let error_json = if let Some(ref results) = partial_results {
+            serde_json::json!({
+                "error": {
+                    "kind": "Interrupted",
+                    "message": "Speed test interrupted by user",
+                    "suggestion": null,
+                },
+                "partial_results": {
+                    "latency_ms": results.latency_median_ms,
+                    "jitter_ms": results.latency_jitter_ms,
+                    "download_mbps": results.download_speed_mbps,
+                    "upload_mbps": results.upload_speed_mbps,
+                    "phase": format!("{:?}", results.phase),
+                }
+            })
+        } else {
+            serde_json::json!({
+                "error": {
+                    "kind": "Interrupted",
+                    "message": "Speed test interrupted by user",
+                    "suggestion": null,
+                }
+            })
+        };
+        eprintln!(
+            "{}",
+            serde_json::to_string(&error_json).unwrap_or_default()
+        );
+    } else {
+        eprintln!("\n{}", "Speed test interrupted by user (Ctrl+C)".yellow());
+
+        // Print partial results if available
+        if let Some(results) = partial_results {
+            eprintln!("\n{}", "Partial results:".bold().white());
+
+            if let Some(latency) = results.latency_median_ms {
+                eprintln!(
+                    "  {} {}",
+                    "Latency:".white(),
+                    format!("{:.2} ms", latency).bright_red()
+                );
+            }
+
+            if let Some(jitter) = results.latency_jitter_ms {
+                eprintln!(
+                    "  {} {}",
+                    "Jitter:".white(),
+                    format!("{:.2} ms", jitter).bright_red()
+                );
+            }
+
+            if let Some(download) = results.download_speed_mbps {
+                let status = if results.download_completed {
+                    ""
+                } else {
+                    " (incomplete)"
+                };
+                eprintln!(
+                    "  {} {}{}",
+                    "Download:".white(),
+                    format!("{:.2} Mbps", download).bright_cyan(),
+                    status.yellow()
+                );
+            }
+
+            if let Some(upload) = results.upload_speed_mbps {
+                let status = if results.upload_completed {
+                    ""
+                } else {
+                    " (incomplete)"
+                };
+                eprintln!(
+                    "  {} {}{}",
+                    "Upload:".white(),
+                    format!("{:.2} Mbps", upload).bright_cyan(),
+                    status.yellow()
+                );
+            }
+        }
+    }
 }
 
 /// Create a user-friendly error from a generic error.
@@ -180,6 +337,7 @@ fn print_error(error: &SpeedTestError, json_mode: bool) {
 }
 
 /// Run the speed test and return a result.
+#[allow(dead_code)]
 async fn run_speed_test(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
 
@@ -313,12 +471,23 @@ async fn run_speed_test(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// In TUI mode, it shows live updates during the test. In JSON mode, it
 /// suppresses all output until the final JSON result.
 ///
+/// # Arguments
+/// * `cli` - Command line arguments
+/// * `tui` - TUI controller for display
+/// * `shutdown_flag` - Atomic flag to check for user interruption
+///
 /// # Requirements
 /// _Requirements: 1.1, 1.2, 1.3, 2.1, 2.2, 2.3_
 async fn run_speed_test_with_tui(
     cli: &Cli,
     tui: &mut TuiController,
+    shutdown_flag: &Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for shutdown before starting
+    if shutdown_flag.load(Ordering::Relaxed) {
+        return Err("Interrupted by user".into());
+    }
+
     let client = Client::new();
 
     // Fetch connection metadata
@@ -356,7 +525,14 @@ async fn run_speed_test_with_tui(
     let engine = TestEngine::new(TestConfig::default(), Some(progress_callback));
 
     // Create a render loop that updates the TUI during test execution
-    let output = run_test_with_render_loop(&engine, tui).await?;
+    let output =
+        run_test_with_render_loop(&engine, tui, Arc::clone(shutdown_flag))
+            .await?;
+
+    // Check for shutdown after test completes
+    if shutdown_flag.load(Ordering::Relaxed) {
+        return Err("Interrupted by user".into());
+    }
 
     // Run packet loss test if configured
     let packet_loss_config = cli.packet_loss_config();
@@ -484,10 +660,23 @@ async fn run_speed_test_with_tui(
 /// Run the test engine with a render loop for TUI updates.
 ///
 /// This function runs the test engine while periodically rendering
-/// the TUI to show progress updates.
+/// the TUI to show progress updates. It also checks for user interruption
+/// via the shutdown flag.
+///
+/// # Arguments
+/// * `engine` - The test engine to run
+/// * `tui` - TUI controller for display
+/// * `shutdown_flag` - Atomic flag to check for user interruption
+///
+/// # Returns
+/// The test output, or an error if the test fails or is interrupted.
+///
+/// # Requirements
+/// _Requirements: 8.2, 8.3_
 async fn run_test_with_render_loop(
     engine: &TestEngine,
     tui: &mut TuiController,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<crate::cloudflare::tests::engine::SpeedTestOutput, Box<dyn std::error::Error>>
 {
     use tokio::select;
@@ -506,6 +695,11 @@ async fn run_test_with_render_loop(
     tokio::pin!(engine_future);
 
     loop {
+        // Check for shutdown
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return Err("Interrupted by user".into());
+        }
+
         select! {
             // Test engine completed
             result = &mut engine_future => {
@@ -522,6 +716,7 @@ async fn run_test_with_render_loop(
 }
 
 /// Print connection metadata in human-readable format.
+#[allow(dead_code)]
 fn print_metadata(
     meta: &crate::cloudflare::requests::meta::Meta,
     location: &crate::cloudflare::requests::locations::Location,
