@@ -1,0 +1,4 @@
+# Run cloud-speed every 15 minutes
+*/15 * * * * root /usr/local/bin/run-speedtest.sh >> /var/log/cloud-speed/cron.log 2>&1
+
+# Keep an empty line at the end (required by cron)
