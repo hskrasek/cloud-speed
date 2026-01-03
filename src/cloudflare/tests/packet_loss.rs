@@ -545,7 +545,8 @@ mod tests {
     // Unit tests for PacketLossConfig
     #[test]
     fn test_packet_loss_config_new() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
 
         assert_eq!(config.turn_server_uri, "turn:example.com:3478");
         assert_eq!(config.num_packets, PacketLossConfig::DEFAULT_NUM_PACKETS);
@@ -655,7 +656,8 @@ mod tests {
     // Unit tests for PacketLossTest URI parsing
     #[test]
     fn test_parse_turn_uri_with_port() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
         let test = PacketLossTest::new(config);
 
         let (host, port) = test.parse_turn_uri().unwrap();
@@ -707,7 +709,8 @@ mod tests {
     // Unit tests for packet creation and validation
     #[test]
     fn test_create_packet() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
         let test = PacketLossTest::new(config);
 
         let packet = test.create_packet(42);
@@ -721,7 +724,8 @@ mod tests {
 
     #[test]
     fn test_validate_response_valid() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
         let test = PacketLossTest::new(config);
 
         let packet = test.create_packet(123);
@@ -730,7 +734,8 @@ mod tests {
 
     #[test]
     fn test_validate_response_wrong_seq() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
         let test = PacketLossTest::new(config);
 
         let packet = test.create_packet(123);
@@ -739,7 +744,8 @@ mod tests {
 
     #[test]
     fn test_validate_response_too_short() {
-        let config = PacketLossConfig::new("turn:example.com:3478".to_string());
+        let config =
+            PacketLossConfig::new("turn:example.com:3478".to_string());
         let test = PacketLossTest::new(config);
 
         let short_packet = vec![0u8; 3];

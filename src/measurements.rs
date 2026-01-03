@@ -287,13 +287,13 @@ pub fn calculate_speed_mbps(bandwidth_bps: f64) -> f64 {
     bandwidth_bps / 1_000_000.0
 }
 
-pub async fn latency_f64(measurements: &Vec<f64>) -> f64 {
-    let mut measurements = measurements.clone();
+pub async fn latency_f64(measurements: &[f64]) -> f64 {
+    let mut measurements = measurements.to_vec();
 
     median_f64(&mut measurements).unwrap()
 }
 
-pub async fn jitter_f64(measurements: &Vec<f64>) -> Option<f64> {
+pub async fn jitter_f64(measurements: &[f64]) -> Option<f64> {
     // Require at least 2 measurements to calculate jitter
     if measurements.len() < 2 {
         return None;

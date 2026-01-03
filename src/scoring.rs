@@ -43,7 +43,7 @@ impl QualityScore {
 
     /// Converts the score to an ordinal value for comparison.
     /// Higher values indicate better quality.
-    fn to_ordinal(&self) -> u8 {
+    fn to_ordinal(self) -> u8 {
         match self {
             QualityScore::Poor => 0,
             QualityScore::Average => 1,
