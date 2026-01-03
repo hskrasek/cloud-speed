@@ -47,7 +47,7 @@ services:
   cloud-speed-runner:
     build:
       context: ../..
-      dockerfile: docker/runner/Dockerfile.prebuilt
+      dockerfile: docker/runner/Dockerfile
     container_name: cloud-speed-runner
     environment:
       - OPENSEARCH_URL=http://opensearch:9200
