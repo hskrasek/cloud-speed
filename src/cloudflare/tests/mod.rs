@@ -1,9 +1,9 @@
-use reqwest::Method;
 use std::borrow::Cow;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::time::Duration;
 
+pub(crate) mod connection;
 pub(crate) mod download;
 pub mod engine;
 pub mod packet_loss;
@@ -16,16 +16,12 @@ pub trait IoReadAndWrite: Read + Write {}
 impl<T: Read + Write> IoReadAndWrite for T {}
 
 pub(crate) trait Test {
-    const METHOD: Method = Method::GET;
-
     fn endpoint(&'_ self) -> Cow<'_, str>;
 
     async fn run(&self, bytes: u64) -> Result<TestResults, Box<dyn Error>>;
 }
 
 impl<T: Test> Test for &T {
-    const METHOD: Method = T::METHOD;
-
     fn endpoint(&'_ self) -> Cow<'_, str> {
         (**self).endpoint()
     }
@@ -36,8 +32,6 @@ impl<T: Test> Test for &T {
 }
 
 impl<T: Test> Test for &mut T {
-    const METHOD: Method = T::METHOD;
-
     fn endpoint(&'_ self) -> Cow<'_, str> {
         (**self).endpoint()
     }

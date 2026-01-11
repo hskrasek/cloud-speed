@@ -285,25 +285,6 @@ impl TuiController {
         }
     }
 
-    /// Force a re-render after a resize event.
-    #[allow(dead_code)]
-    pub fn handle_resize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.mode != DisplayMode::Tui {
-            return Ok(());
-        }
-
-        if let Some(ref mut terminal) = self.terminal {
-            let size = terminal.size()?;
-            if let Ok(mut state) = self.state.lock() {
-                state.terminal_width = size.width;
-                state.terminal_height = size.height;
-            }
-            self.render()?;
-        }
-
-        Ok(())
-    }
-
     /// Display final results.
     pub fn show_results(
         &mut self,
@@ -339,12 +320,6 @@ impl TuiController {
         Arc::new(TuiProgressCallback { state: Arc::clone(&self.state) })
     }
 
-    /// Get a reference to the shared state.
-    #[cfg(test)]
-    pub fn state(&self) -> Arc<Mutex<TuiState>> {
-        Arc::clone(&self.state)
-    }
-
     /// Get partial results collected so far.
     pub fn get_partial_results(&self) -> Option<PartialResults> {
         let state = self.state.lock().ok()?;
@@ -357,11 +332,8 @@ impl TuiController {
         }
 
         Some(PartialResults {
-            server: state.server.clone(),
-            connection: state.connection.clone(),
             latency_median_ms: state.latency.median_ms,
             latency_jitter_ms: state.latency.jitter_ms,
-            latency_measurements: state.latency.measurements.len(),
             download_speed_mbps: state
                 .download
                 .final_speed_mbps
@@ -380,19 +352,10 @@ impl TuiController {
 /// Partial results collected during an interrupted test.
 #[derive(Debug, Clone)]
 pub struct PartialResults {
-    /// Server location info
-    #[allow(dead_code)]
-    pub server: Option<ServerInfo>,
-    /// Connection metadata
-    #[allow(dead_code)]
-    pub connection: Option<ConnectionInfo>,
     /// Median latency in ms (if calculated)
     pub latency_median_ms: Option<f64>,
     /// Jitter in ms (if calculated)
     pub latency_jitter_ms: Option<f64>,
-    /// Number of latency measurements collected
-    #[allow(dead_code)]
-    pub latency_measurements: usize,
     /// Download speed in Mbps (final or current)
     pub download_speed_mbps: Option<f64>,
     /// Whether download phase completed
