@@ -262,7 +262,9 @@ impl TestEngine {
             .run_latency_internal(self.config.latency_packets, true)
             .await?;
 
-        let idle_ms = latency_f64(&idle_latencies);
+        // run_latency_internal guarantees non-empty vec on success
+        let idle_ms = latency_f64(&idle_latencies)
+            .expect("idle_latencies is non-empty after successful run_latency_internal");
         let idle_jitter_ms = jitter_f64(&idle_latencies);
 
         info!("Idle latency: {:.2} ms, jitter: {:?}", idle_ms, idle_jitter_ms);

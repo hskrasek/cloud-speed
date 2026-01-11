@@ -230,8 +230,8 @@ async fn execute_http_post_with_latency(
         let mut last_measurement = Instant::now();
 
         loop {
-            // Check if we should stop
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            // Check if we should stop (Acquire pairs with Release in main thread)
+            if stop_flag_clone.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
 
@@ -242,8 +242,8 @@ async fn execute_http_post_with_latency(
                     .await;
             }
 
-            // Check again after sleep
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            // Check again after sleep (Acquire pairs with Release in main thread)
+            if stop_flag_clone.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
 
@@ -292,8 +292,8 @@ async fn execute_http_post_with_latency(
     let mut buff = Vec::new();
     tcp.read_to_end(&mut buff)?;
 
-    // Signal latency task to stop
-    stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Signal latency task to stop (Release ensures visibility to other thread)
+    stop_flag.store(true, std::sync::atomic::Ordering::Release);
 
     // Wait for latency task to finish (with timeout)
     let _ =

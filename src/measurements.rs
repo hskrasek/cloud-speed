@@ -287,10 +287,15 @@ pub fn calculate_speed_mbps(bandwidth_bps: f64) -> f64 {
     bandwidth_bps / 1_000_000.0
 }
 
-pub fn latency_f64(measurements: &[f64]) -> f64 {
+/// Calculates the median latency from a slice of measurements.
+///
+/// Returns `None` if the measurements slice is empty.
+pub fn latency_f64(measurements: &[f64]) -> Option<f64> {
+    if measurements.is_empty() {
+        return None;
+    }
     let mut measurements = measurements.to_vec();
-
-    median_f64(&mut measurements).unwrap()
+    median_f64(&mut measurements)
 }
 
 pub fn jitter_f64(measurements: &[f64]) -> Option<f64> {

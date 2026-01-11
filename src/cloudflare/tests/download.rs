@@ -135,7 +135,9 @@ fn execute_http_get(
         }
     }
 
-    let headers = extract_http_headers(String::from_utf8(headers).unwrap());
+    let headers_str = String::from_utf8(headers)
+        .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+    let headers = extract_http_headers(&headers_str);
 
     // Extract server processing time from server-timing header
     let server_time = headers
@@ -169,23 +171,30 @@ fn build_http_header(url: &Url) -> String {
     )
 }
 
-fn extract_http_headers(raw_headers: String) -> HeaderMap {
+fn extract_http_headers(raw_headers: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
     for line in raw_headers.lines() {
         let line = line.trim();
 
-        if line.is_empty() {
-            continue;
-        }
-
-        if !line.contains(":") {
+        if line.is_empty() || !line.contains(':') {
             continue;
         }
 
         let parts: Vec<&str> = line.splitn(2, ':').collect();
-        let name = HeaderName::from_str(parts[0].trim()).unwrap();
-        let value = HeaderValue::from_str(parts[1].trim()).unwrap();
+        if parts.len() != 2 {
+            continue;
+        }
+
+        // Skip malformed header names/values instead of panicking
+        let name = match HeaderName::from_str(parts[0].trim()) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let value = match HeaderValue::from_str(parts[1].trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
         headers.append(name, value);
     }
@@ -231,8 +240,8 @@ async fn execute_http_get_with_latency(
         let mut last_measurement = Instant::now();
 
         loop {
-            // Check if we should stop
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            // Check if we should stop (Acquire pairs with Release in main thread)
+            if stop_flag_clone.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
 
@@ -243,8 +252,8 @@ async fn execute_http_get_with_latency(
                     .await;
             }
 
-            // Check again after sleep
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            // Check again after sleep (Acquire pairs with Release in main thread)
+            if stop_flag_clone.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
 
@@ -280,7 +289,9 @@ async fn execute_http_get_with_latency(
         }
     }
 
-    let headers = extract_http_headers(String::from_utf8(headers).unwrap());
+    let headers_str = String::from_utf8(headers)
+        .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+    let headers = extract_http_headers(&headers_str);
 
     // Extract server processing time from server-timing header
     let server_time = headers
@@ -295,8 +306,8 @@ async fn execute_http_get_with_latency(
 
     let end_duration = ttfb_start.elapsed();
 
-    // Signal latency task to stop
-    stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Signal latency task to stop (Release ensures visibility to other thread)
+    stop_flag.store(true, std::sync::atomic::Ordering::Release);
 
     // Wait for latency task to finish (with timeout)
     let _ =
