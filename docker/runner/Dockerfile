@@ -1,10 +1,13 @@
 # Build stage - compile for Linux target
 FROM rust:1-alpine AS builder
 
-# Install git for build.rs (captures git hash for version string)
+# Install build dependencies
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add --no-cache \
-    git
+    git \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static
 
 WORKDIR /app
 
@@ -19,11 +22,14 @@ RUN cargo build --profile release-lto
 # Runtime stage - minimal image (no Rust toolchain needed)
 FROM alpine:latest
 
+# Install runtime dependencies for TLS
+RUN apk add --no-cache ca-certificates
+
 # Copy the built binary from builder stage
 COPY --from=builder /app/target/release-lto/cloud-speed /usr/local/bin/cloud-speed
 
 # Set permissions
 RUN chmod +x /usr/local/bin/cloud-speed
 
-# Start cron in foreground
+# Run the speed test
 CMD ["cloud-speed", "--json"]

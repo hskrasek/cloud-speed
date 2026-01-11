@@ -4,6 +4,23 @@ use crate::cloudflare::requests::Request;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+/// Cloudflare datacenter (colo) information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Colo {
+    /// IATA airport code for the datacenter location
+    pub iata: String,
+    /// Latitude of the datacenter
+    pub lat: f64,
+    /// Longitude of the datacenter
+    pub lon: f64,
+    /// ISO 3166-1 alpha-2 country code
+    pub cca2: String,
+    /// Geographic region name
+    pub region: String,
+    /// City name
+    pub city: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Meta {
     pub hostname: String,
@@ -14,7 +31,7 @@ pub(crate) struct Meta {
     pub asn: i64,
     #[serde(rename = "asOrganization")]
     pub as_organization: String,
-    pub colo: String,
+    pub colo: Colo,
     pub country: String,
     pub city: String,
     pub region: String,

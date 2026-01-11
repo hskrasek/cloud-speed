@@ -1,5 +1,5 @@
 use crate::cloudflare::requests::{Request, RequestBody};
-use reqwest::{header, Body, Client as ReqwestClient, RequestBuilder};
+use reqwest::{Body, Client as ReqwestClient, RequestBuilder};
 use std::error::Error;
 
 static BASE_URL: &str = "https://speed.cloudflare.com";
@@ -31,18 +31,15 @@ impl Client {
             .await?
             .error_for_status()?;
 
-        if let Some(ct_value) = response.headers().get(header::CONTENT_TYPE) {
-            if let Ok(content_type) = ct_value.to_str() {
-                if content_type.starts_with("application/json") {
-                    return response
-                        .json::<R::Response>()
-                        .await
-                        .map_err(Into::into);
-                }
-            }
+        // Get the response text
+        let text = response.text().await?;
+
+        // Try JSON deserialization first (Cloudflare often returns JSON with text/plain content-type)
+        if let Ok(parsed) = serde_json::from_str::<R::Response>(&text) {
+            return Ok(parsed);
         }
 
-        let text = response.text().await?;
+        // Fall back to plain text deserialization for simple responses (e.g., locations endpoint)
         let deserialized = serde_plain::from_str(&text)?;
 
         Ok(deserialized)

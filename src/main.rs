@@ -380,7 +380,7 @@ async fn run_speed_test_with_tui(
         .send(Locations {})
         .await
         .map_err(|e| format!("Failed to fetch server locations: {}", e))?
-        .get(&meta.colo);
+        .get(&meta.colo.iata);
 
     // Set metadata in TUI
     let server_info = ServerInfo {
