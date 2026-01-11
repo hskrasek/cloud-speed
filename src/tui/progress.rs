@@ -56,9 +56,6 @@ pub enum ProgressEvent {
     },
     /// Phase completed with results
     PhaseComplete(TestPhase),
-    /// Error occurred
-    #[allow(dead_code)]
-    Error(String),
 }
 
 /// Callback interface for progress updates.

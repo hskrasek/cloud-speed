@@ -85,9 +85,6 @@ impl LatencyState {
 pub struct SpeedSample {
     /// Speed in Mbps
     pub speed_mbps: f64,
-    /// Timestamp (relative, for graph positioning)
-    #[allow(dead_code)]
-    pub timestamp: f64,
 }
 
 /// Bandwidth measurement state.
@@ -252,10 +249,8 @@ impl TuiState {
                 state.total_measurements = *total;
 
                 // Add to speed history for graph
-                let elapsed = self.test_start_time.elapsed().as_secs_f64();
                 state.speed_history.push(SpeedSample {
                     speed_mbps: *speed_mbps,
-                    timestamp: elapsed,
                 });
             }
             ProgressEvent::PhaseComplete(phase) => {
@@ -313,9 +308,6 @@ impl TuiState {
                     }
                     _ => {}
                 }
-            }
-            ProgressEvent::Error(message) => {
-                self.set_error(message.clone(), None);
             }
         }
     }
@@ -467,18 +459,6 @@ mod tests {
         assert_eq!(state.download.final_speed_mbps, Some(95.5));
     }
 
-    #[test]
-    fn test_update_from_error() {
-        let mut state = TuiState::new();
-
-        state.update_from_event(&ProgressEvent::Error(
-            "Network timeout".to_string(),
-        ));
-
-        assert!(state.error.is_some());
-        assert_eq!(state.error.as_ref().unwrap().message, "Network timeout");
-    }
-
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -545,68 +525,6 @@ mod tests {
 
                 last_percentage = current_percentage;
             }
-        }
-
-        #[test]
-        fn error_state_preservation(
-            num_latency_measurements in 0usize..20,
-            num_download_measurements in 0usize..10,
-            num_upload_measurements in 0usize..10,
-            error_message in "[a-zA-Z0-9 ]{1,50}"
-        ) {
-            let mut state = TuiState::new();
-
-            for i in 0..num_latency_measurements {
-                state.update_from_event(&ProgressEvent::LatencyMeasurement {
-                    value_ms: 10.0 + i as f64,
-                    current: i + 1,
-                    total: num_latency_measurements.max(1),
-                });
-            }
-
-            for i in 0..num_download_measurements {
-                state.update_from_event(&ProgressEvent::BandwidthMeasurement {
-                    direction: BandwidthDirection::Download,
-                    speed_mbps: 50.0 + i as f64,
-                    bytes: (i as u64 + 1) * 1_000_000,
-                    current: i + 1,
-                    total: num_download_measurements.max(1),
-                });
-            }
-
-            for i in 0..num_upload_measurements {
-                state.update_from_event(&ProgressEvent::BandwidthMeasurement {
-                    direction: BandwidthDirection::Upload,
-                    speed_mbps: 30.0 + i as f64,
-                    bytes: (i as u64 + 1) * 500_000,
-                    current: i + 1,
-                    total: num_upload_measurements.max(1),
-                });
-            }
-
-            let latency_count_before = state.latency.measurements.len();
-            let download_measurement_before = state.download.current_measurement;
-            let upload_measurement_before = state.upload.current_measurement;
-
-            state.update_from_event(&ProgressEvent::Error(error_message.clone()));
-
-            prop_assert!(state.error.is_some());
-            prop_assert_eq!(
-                &state.error.as_ref().unwrap().message,
-                &error_message
-            );
-            prop_assert_eq!(
-                state.latency.measurements.len(),
-                latency_count_before
-            );
-            prop_assert_eq!(
-                state.download.current_measurement,
-                download_measurement_before
-            );
-            prop_assert_eq!(
-                state.upload.current_measurement,
-                upload_measurement_before
-            );
         }
     }
 }

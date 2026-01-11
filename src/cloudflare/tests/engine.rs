@@ -262,8 +262,8 @@ impl TestEngine {
             .run_latency_internal(self.config.latency_packets, true)
             .await?;
 
-        let idle_ms = latency_f64(&idle_latencies).await;
-        let idle_jitter_ms = jitter_f64(&idle_latencies).await;
+        let idle_ms = latency_f64(&idle_latencies);
+        let idle_jitter_ms = jitter_f64(&idle_latencies);
 
         info!("Idle latency: {:.2} ms, jitter: {:?}", idle_ms, idle_jitter_ms);
 
@@ -291,7 +291,7 @@ impl TestEngine {
         };
 
         let loaded_down_jitter_ms = if loaded_down_latencies.len() >= 2 {
-            jitter_f64(&loaded_down_latencies).await
+            jitter_f64(&loaded_down_latencies)
         } else {
             None
         };
@@ -304,7 +304,7 @@ impl TestEngine {
         };
 
         let loaded_up_jitter_ms = if loaded_up_latencies.len() >= 2 {
-            jitter_f64(&loaded_up_latencies).await
+            jitter_f64(&loaded_up_latencies)
         } else {
             None
         };
@@ -1082,13 +1082,6 @@ mod tests {
         events
             .iter()
             .filter(|e| matches!(e, ProgressEvent::PhaseChange(_)))
-            .count()
-    }
-
-    fn count_phase_completes(events: &[ProgressEvent]) -> usize {
-        events
-            .iter()
-            .filter(|e| matches!(e, ProgressEvent::PhaseComplete(_)))
             .count()
     }
 

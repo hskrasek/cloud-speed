@@ -287,13 +287,13 @@ pub fn calculate_speed_mbps(bandwidth_bps: f64) -> f64 {
     bandwidth_bps / 1_000_000.0
 }
 
-pub async fn latency_f64(measurements: &[f64]) -> f64 {
+pub fn latency_f64(measurements: &[f64]) -> f64 {
     let mut measurements = measurements.to_vec();
 
     median_f64(&mut measurements).unwrap()
 }
 
-pub async fn jitter_f64(measurements: &[f64]) -> Option<f64> {
+pub fn jitter_f64(measurements: &[f64]) -> Option<f64> {
     // Require at least 2 measurements to calculate jitter
     if measurements.len() < 2 {
         return None;
@@ -521,53 +521,53 @@ mod tests {
     }
 
     // Tests for jitter_f64
-    #[tokio::test]
-    async fn test_jitter_f64_basic() {
+    #[test]
+    fn test_jitter_f64_basic() {
         // Measurements: [10.0, 15.0, 12.0, 18.0]
         // Differences: |15-10|=5, |12-15|=3, |18-12|=6
         // Mean: (5 + 3 + 6) / 3 = 4.666...
         let measurements = vec![10.0, 15.0, 12.0, 18.0];
-        let result = jitter_f64(&measurements).await.unwrap();
+        let result = jitter_f64(&measurements).unwrap();
         assert!((result - 14.0 / 3.0).abs() < 0.001);
     }
 
-    #[tokio::test]
-    async fn test_jitter_f64_two_measurements() {
+    #[test]
+    fn test_jitter_f64_two_measurements() {
         // Minimum case: 2 measurements
         let measurements = vec![10.0, 15.0];
-        let result = jitter_f64(&measurements).await.unwrap();
+        let result = jitter_f64(&measurements).unwrap();
         assert!((result - 5.0).abs() < 0.001);
     }
 
-    #[tokio::test]
-    async fn test_jitter_f64_single_measurement() {
+    #[test]
+    fn test_jitter_f64_single_measurement() {
         // Should return None for single measurement
         let measurements = vec![10.0];
-        let result = jitter_f64(&measurements).await;
+        let result = jitter_f64(&measurements);
         assert_eq!(result, None);
     }
 
-    #[tokio::test]
-    async fn test_jitter_f64_empty() {
+    #[test]
+    fn test_jitter_f64_empty() {
         // Should return None for empty measurements
         let measurements: Vec<f64> = vec![];
-        let result = jitter_f64(&measurements).await;
+        let result = jitter_f64(&measurements);
         assert_eq!(result, None);
     }
 
-    #[tokio::test]
-    async fn test_jitter_f64_constant_values() {
+    #[test]
+    fn test_jitter_f64_constant_values() {
         // All same values = 0 jitter
         let measurements = vec![10.0, 10.0, 10.0, 10.0];
-        let result = jitter_f64(&measurements).await.unwrap();
+        let result = jitter_f64(&measurements).unwrap();
         assert_eq!(result, 0.0);
     }
 
-    #[tokio::test]
-    async fn test_jitter_f64_always_non_negative() {
+    #[test]
+    fn test_jitter_f64_always_non_negative() {
         // Jitter should always be non-negative regardless of order
         let measurements = vec![20.0, 10.0, 30.0, 5.0];
-        let result = jitter_f64(&measurements).await.unwrap();
+        let result = jitter_f64(&measurements).unwrap();
         assert!(result >= 0.0);
     }
 
@@ -709,9 +709,7 @@ mod tests {
                 .map(|pair| (pair[1] - pair[0]).abs())
                 .sum::<f64>() / (measurements.len() - 1) as f64;
 
-            // Use tokio runtime to call async function
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(jitter_f64(&measurements));
+            let result = jitter_f64(&measurements);
 
             prop_assert!(result.is_some());
             let jitter = result.unwrap();
@@ -734,8 +732,7 @@ mod tests {
                 2..100
             ).prop_filter("no NaN or infinite values", |v| v.iter().all(|x| x.is_finite()))
         ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(jitter_f64(&measurements));
+            let result = jitter_f64(&measurements);
 
             prop_assert!(result.is_some());
             let jitter = result.unwrap();
@@ -754,8 +751,7 @@ mod tests {
         ) {
             let measurements: Vec<f64> = vec![value; len];
 
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(jitter_f64(&measurements));
+            let result = jitter_f64(&measurements);
 
             prop_assert!(result.is_some());
             let jitter = result.unwrap();
@@ -771,16 +767,14 @@ mod tests {
         fn jitter_requires_minimum_two_measurements(
             value in prop::num::f64::NORMAL.prop_filter("finite", |x| x.is_finite())
         ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-
             // Empty vector
             let empty: Vec<f64> = vec![];
-            let result_empty = rt.block_on(jitter_f64(&empty));
+            let result_empty = jitter_f64(&empty);
             prop_assert!(result_empty.is_none(), "Jitter of empty vec should be None");
 
             // Single element
             let single = vec![value];
-            let result_single = rt.block_on(jitter_f64(&single));
+            let result_single = jitter_f64(&single);
             prop_assert!(result_single.is_none(), "Jitter of single element should be None");
         }
 
@@ -793,13 +787,11 @@ mod tests {
                 2..50
             )
         ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-
-            let result_forward = rt.block_on(jitter_f64(&measurements));
+            let result_forward = jitter_f64(&measurements);
 
             let mut reversed = measurements.clone();
             reversed.reverse();
-            let result_reversed = rt.block_on(jitter_f64(&reversed));
+            let result_reversed = jitter_f64(&reversed);
 
             prop_assert!(result_forward.is_some());
             prop_assert!(result_reversed.is_some());

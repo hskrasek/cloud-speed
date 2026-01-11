@@ -1,16 +1,14 @@
 use crate::cloudflare::requests::UA;
+use crate::cloudflare::tests::connection::{
+    measure_tcp_latency, resolve_dns, tcp_connect, tls_handshake_duration,
+};
 use crate::cloudflare::tests::{IoReadAndWrite, Test, TestResults, BASE_URL};
-use hickory_resolver::Resolver;
 use log::{debug, info};
-use reqwest::Method;
-use rustls_connector::RustlsConnector;
 use std::borrow::Cow;
-use std::convert::Into;
 use std::error::Error;
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpStream};
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -70,7 +68,7 @@ impl Upload {
         let url =
             Url::parse(format!("{}/{}", BASE_URL, self.endpoint()).as_str())?;
 
-        let (ip_address, _dns_duration) = resolve_dns(&url)?;
+        let (ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
         let (stream, tcp_connect_duration) = tcp_connect(ip_address, port)?;
         let (mut stream, _tls_handshake_duration) =
@@ -101,8 +99,6 @@ impl Upload {
 }
 
 impl Test for Upload {
-    const METHOD: Method = Method::POST;
-
     fn endpoint(&'_ self) -> Cow<'_, str> {
         "__up".into()
     }
@@ -115,7 +111,7 @@ impl Test for Upload {
         let url =
             Url::parse(format!("{}/{}", BASE_URL, self.endpoint()).as_str())?;
 
-        let (_ip_address, _dns_duration) = resolve_dns(&url)?;
+        let (_ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
         let (stream, tcp_connect_duration) = tcp_connect(_ip_address, port)?;
         let (mut stream, _tls_handshake_duration) =
@@ -131,61 +127,6 @@ impl Test for Upload {
             bytes,
         ))
     }
-}
-
-fn resolve_dns(url: &Url) -> Result<(IpAddr, Duration), Box<dyn Error>> {
-    let resolver =
-        Resolver::from_system_conf().or_else(|_| Resolver::default())?;
-
-    let begin = Instant::now();
-
-    let response = {
-        let url = url.clone();
-        thread::spawn(move || resolver.lookup_ip(url.host_str().unwrap()))
-            .join()
-            .unwrap()?
-    };
-
-    let duration = begin.elapsed();
-
-    let ipv4_addresses =
-        response.iter().filter(|addr| addr.is_ipv4()).collect::<Vec<_>>();
-
-    let ipv6_addresses =
-        response.iter().filter(|addr| addr.is_ipv6()).collect::<Vec<_>>();
-
-    if !ipv4_addresses.is_empty() {
-        return Ok((ipv4_addresses[0], duration));
-    }
-
-    Ok((ipv6_addresses[0], duration))
-}
-
-fn tcp_connect(
-    address: IpAddr,
-    port: u16,
-) -> Result<(TcpStream, Duration), Box<dyn Error>> {
-    let now = Instant::now();
-    let mut stream = TcpStream::connect((address, port))?;
-    stream.flush()?;
-    let tcp_connect_duration = now.elapsed();
-
-    Ok((stream, tcp_connect_duration))
-}
-
-fn tls_handshake_duration(
-    tcp: TcpStream,
-    url: &Url,
-) -> Result<(Box<dyn IoReadAndWrite>, Duration), Box<dyn Error>> {
-    let connector: RustlsConnector = RustlsConnector::new_with_native_certs()
-        .unwrap_or_else(|_| RustlsConnector::new_with_webpki_roots_certs());
-    let now = Instant::now();
-
-    let certificate_host = url.host_str().unwrap_or("");
-    let mut stream = connector.connect(certificate_host, tcp)?;
-    stream.flush().expect("Stream error");
-    let tls_handshake_duration = now.elapsed();
-    Ok((Box::new(stream), tls_handshake_duration))
 }
 
 fn execute_http_post(
@@ -364,25 +305,4 @@ async fn execute_http_post_with_latency(
     // - bandwidth calculation uses upload_duration directly without subtracting
     //   server_time (which for uploads includes the receive time)
     Ok((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
-}
-
-/// Measure TCP latency by performing a TCP handshake.
-///
-/// This is used for loaded latency measurements during uploads.
-/// Returns the round-trip time in milliseconds.
-fn measure_tcp_latency(
-    ip_address: IpAddr,
-    port: u16,
-) -> Result<f64, Box<dyn Error + Send + Sync>> {
-    let start = Instant::now();
-    let stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::new(ip_address, port),
-        Duration::from_secs(5),
-    )?;
-    let latency = start.elapsed();
-
-    // Close the connection
-    drop(stream);
-
-    Ok(latency.as_secs_f64() * 1000.0)
 }

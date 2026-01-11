@@ -21,19 +21,16 @@ clap-verbosity-flag = "3.0.2"
 colored = "3.0.0"
 env_logger = "0.11.6"
 log = "0.4.26"
-reqwest = { version = "0.12.12", features = ["json"] }
-rustls = { version = "0.23.23", default-features = false, features = ["tls12", "logging", "ring"] }
-rustls-connector = { version = "0.21.4", default-features = false, features = ["rustls--ring", "native-certs", "webpki-roots-certs"] }
+reqwest = { version = "0.13.1", features = ["json"] }
+rustls-connector = { version = "0.22.0", default-features = false, features = ["rustls--ring", "native-certs", "webpki-roots-certs"] }
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.139"
 serde_plain = "1.0.2"
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros", "signal"] }
-ttfb = "1.14.0"
 url = "2.5.4"
 http = "1.1.0"
-futures = "0.3.31"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30.0"
+crossterm = "0.29.0"
 
 [dependencies.clap]
 version = "4.5.31"
@@ -41,23 +38,12 @@ default-features = false
 features = ["derive", "help", "suggestions", "usage"]
 
 [dependencies.hickory-resolver]
-version = "0.24.4"
+version = "0.25.2"
 default-features = false
-features = ["dns-over-rustls", "system-config"]
+features = ["system-config", "tokio"]
 
 [dev-dependencies]
 proptest = "1.5.0"
-
-[build-dependencies]
-colored = "3.0.0"
-reqwest = { version = "0.12.12", features = ["json"] }
-serde = { version = "1.0.213", features = ["derive"] }
-serde_plain = "1.0.2"
-
-[build-dependencies.clap]
-version = "4.5.21"
-default-features = false
-features = ["derive", "suggestions", "std"]
 
 [[bin]]
 bench = false

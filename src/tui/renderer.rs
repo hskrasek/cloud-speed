@@ -46,24 +46,6 @@ pub fn format_latency(latency_ms: f64) -> String {
     format!("{:.2} ms", latency_ms)
 }
 
-/// Format file size for display.
-#[allow(dead_code)]
-pub fn format_size_label(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1}KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
 /// Minimal mode threshold in columns.
 const MINIMAL_MODE_THRESHOLD: u16 = 60;
 
@@ -803,17 +785,6 @@ mod tests {
                 prop_assert_eq!(speed_color(speed), Color::Red);
             }
         }
-    }
-
-    #[test]
-    fn test_format_size_label() {
-        assert_eq!(format_size_label(0), "0B");
-        assert_eq!(format_size_label(512), "512B");
-        assert_eq!(format_size_label(1024), "1.0KB");
-        assert_eq!(format_size_label(1536), "1.5KB");
-        assert_eq!(format_size_label(1024 * 1024), "1.0MB");
-        assert_eq!(format_size_label(10 * 1024 * 1024), "10.0MB");
-        assert_eq!(format_size_label(1024 * 1024 * 1024), "1.0GB");
     }
 
     proptest! {

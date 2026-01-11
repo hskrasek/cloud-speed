@@ -12,17 +12,19 @@ use serde::Serialize;
 ///
 /// Each category represents a level of quality for a specific use case,
 /// based on the measured network metrics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// Variants are ordered from worst to best for correct derived Ord behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QualityScore {
-    /// Excellent performance - optimal for the use case
-    Great,
-    /// Good performance - suitable for the use case
-    Good,
-    /// Acceptable performance - may experience occasional issues
-    Average,
     /// Poor performance - likely to experience significant issues
     Poor,
+    /// Acceptable performance - may experience occasional issues
+    Average,
+    /// Good performance - suitable for the use case
+    Good,
+    /// Excellent performance - optimal for the use case
+    Great,
 }
 
 impl QualityScore {
@@ -38,30 +40,7 @@ impl QualityScore {
 
     /// Returns true if this score is better than or equal to the other score.
     pub fn is_at_least(&self, other: QualityScore) -> bool {
-        self.to_ordinal() >= other.to_ordinal()
-    }
-
-    /// Converts the score to an ordinal value for comparison.
-    /// Higher values indicate better quality.
-    fn to_ordinal(self) -> u8 {
-        match self {
-            QualityScore::Poor => 0,
-            QualityScore::Average => 1,
-            QualityScore::Good => 2,
-            QualityScore::Great => 3,
-        }
-    }
-}
-
-impl PartialOrd for QualityScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for QualityScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.to_ordinal().cmp(&other.to_ordinal())
+        *self >= other
     }
 }
 
