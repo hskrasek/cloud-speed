@@ -9,7 +9,7 @@ cloud-speed is a tool for testing your networks speed and consistency.
 documentation = "https://github.com/hskrasek/cloud-speed"
 homepage = "https://github.com/hskrasek/cloud-speed"
 repository = "https://github.com/hskrasek/cloud-speed"
-license = "AGPL-3"
+license = "AGPL-3.0-only"
 readme = "README.md"
 keywords = ["cloud-speed", "cloudflare"]
 categories = ["command-line-utilities"]
