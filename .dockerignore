@@ -1,0 +1,28 @@
+# Git (note: .git is kept for version hash in build.rs)
+.gitignore
+.jj
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust build artifacts
+target/
+
+# Documentation (not needed in image)
+*.md
+LICENSE*
+
+# CI/CD
+.github/
+
+# Development
+.claude/
+CLAUDE.md
+
+# Docker files
+Dockerfile
+.dockerignore
+docker-compose*.yml
