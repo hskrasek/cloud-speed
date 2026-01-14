@@ -136,6 +136,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: cloud-speed-*
 
       - name: Prepare release assets
         run: |
