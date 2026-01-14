@@ -72,9 +72,10 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.exe
 
-  # Build and push multi-arch Docker images
+  # Build and push multi-arch Docker images using pre-built binaries
   build-docker:
     name: Build Docker Images
+    needs: build-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,6 +84,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cloud-speed-linux-*
+          path: binaries
+
+      - name: Prepare binaries for Docker
+        run: |
+          mkdir -p linux/amd64 linux/arm64
+          cp binaries/cloud-speed-linux-x64/cloud-speed-linux-x64 linux/amd64/cloud-speed
+          cp binaries/cloud-speed-linux-arm64/cloud-speed-linux-arm64 linux/arm64/cloud-speed
+          chmod +x linux/amd64/cloud-speed linux/arm64/cloud-speed
+          ls -la linux/*/
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -117,8 +132,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   # Create GitHub Release with binaries
   create-release:
