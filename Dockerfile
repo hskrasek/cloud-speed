@@ -1,7 +1,7 @@
-FROM alpine:latest
+FROM debian:bookworm-slim
 
 # Install runtime dependencies for TLS
-RUN apk add --no-cache ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy platform-specific pre-built binary
 # TARGETARCH is automatically set by BuildKit to "amd64" or "arm64"
