@@ -19,8 +19,8 @@ use url::Url;
 /// This struct performs upload tests by POSTing data to Cloudflare's
 /// `/__up` endpoint and measuring the timing breakdown.
 pub(crate) struct Upload {
-    /// Pre-generated payload data to upload
-    data: Vec<u8>,
+    /// Pre-generated payload data to upload (Arc for cheap cloning into spawn_blocking)
+    data: Arc<Vec<u8>>,
 }
 
 impl Upload {
@@ -33,7 +33,7 @@ impl Upload {
     /// A new Upload instance with pre-generated payload data
     pub fn new(bytes: u64) -> Self {
         // Generate payload data (zeros are efficient and compress well)
-        let data = vec![b'0'; bytes as usize];
+        let data = Arc::new(vec![b'0'; bytes as usize]);
         Self { data }
     }
 
@@ -134,7 +134,7 @@ impl Test for Upload {
 async fn execute_http_post(
     mut tcp: Box<dyn IoReadAndWrite>,
     url: Url,
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
     tokio::task::spawn_blocking(move || {
         let header = build_http_post_header(&url, data.len());
@@ -172,7 +172,8 @@ async fn execute_http_post(
         // Check HTTP status code
         let headers_str = String::from_utf8(headers)
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
-        let status = extract_http_status(&headers_str).unwrap_or(0);
+        let status = extract_http_status(&headers_str)
+            .ok_or("Malformed HTTP response from speed test server")?;
         if status != 200 {
             return Err(format!("HTTP {status} from speed test server").into());
         }
@@ -218,7 +219,7 @@ fn build_http_post_header(url: &Url, content_length: usize) -> String {
 async fn execute_http_post_with_latency(
     mut tcp: Box<dyn IoReadAndWrite>,
     url: &Url,
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     ip_address: IpAddr,
     port: u16,
     latency_tx: mpsc::Sender<f64>,
@@ -303,7 +304,8 @@ async fn execute_http_post_with_latency(
         // Check HTTP status code
         let headers_str = String::from_utf8(headers)
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
-        let status = extract_http_status(&headers_str).unwrap_or(0);
+        let status = extract_http_status(&headers_str)
+            .ok_or("Malformed HTTP response from speed test server")?;
         if status != 200 {
             return Err(format!("HTTP {status} from speed test server").into());
         }

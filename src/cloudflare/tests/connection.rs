@@ -79,7 +79,7 @@ pub async fn tls_handshake_duration(
             let now = Instant::now();
 
             let mut stream = connector.connect(&host, tcp)?;
-            stream.flush().expect("Stream error");
+            stream.flush()?;
             let tls_handshake_duration = now.elapsed();
             Ok((
                 Box::new(stream) as Box<dyn IoReadAndWrite>,

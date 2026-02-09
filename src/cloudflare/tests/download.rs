@@ -143,7 +143,8 @@ async fn execute_http_get(
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
 
         // Check HTTP status code before processing body
-        let status = extract_http_status(&headers_str).unwrap_or(0);
+        let status = extract_http_status(&headers_str)
+            .ok_or("Malformed HTTP response from speed test server")?;
         if status != 200 {
             return Err(format!("HTTP {status} from speed test server").into());
         }
@@ -305,7 +306,8 @@ async fn execute_http_get_with_latency(
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
 
         // Check HTTP status code before processing body
-        let status = extract_http_status(&headers_str).unwrap_or(0);
+        let status = extract_http_status(&headers_str)
+            .ok_or("Malformed HTTP response from speed test server")?;
         if status != 200 {
             return Err(format!("HTTP {status} from speed test server").into());
         }
