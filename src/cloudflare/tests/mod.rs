@@ -11,6 +11,17 @@ pub(crate) mod upload;
 
 pub(crate) static BASE_URL: &str = "https://speed.cloudflare.com";
 
+/// Extract HTTP status code from a raw HTTP response status line.
+///
+/// Parses "HTTP/1.1 200 OK\r\n..." and returns the numeric status code.
+pub(crate) fn extract_http_status(raw_headers: &str) -> Option<u16> {
+    raw_headers
+        .lines()
+        .next()
+        .and_then(|status_line| status_line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+}
+
 pub trait IoReadAndWrite: Read + Write + Send {}
 
 impl<T: Read + Write + Send> IoReadAndWrite for T {}

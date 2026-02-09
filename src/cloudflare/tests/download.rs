@@ -2,7 +2,7 @@ use crate::cloudflare::requests::UA;
 use crate::cloudflare::tests::connection::{
     measure_tcp_latency, resolve_dns, tcp_connect, tls_handshake_duration,
 };
-use crate::cloudflare::tests::{IoReadAndWrite, Test, TestResults, BASE_URL};
+use crate::cloudflare::tests::{extract_http_status, IoReadAndWrite, Test, TestResults, BASE_URL};
 use crate::measurements::parse_server_timing;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use log::{debug, info};
@@ -141,6 +141,13 @@ async fn execute_http_get(
 
         let headers_str = String::from_utf8(headers)
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+
+        // Check HTTP status code before processing body
+        let status = extract_http_status(&headers_str).unwrap_or(0);
+        if status != 200 {
+            return Err(format!("HTTP {status} from speed test server").into());
+        }
+
         let headers = extract_http_headers(&headers_str);
 
         // Extract server processing time from server-timing header
@@ -296,6 +303,13 @@ async fn execute_http_get_with_latency(
 
         let headers_str = String::from_utf8(headers)
             .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+
+        // Check HTTP status code before processing body
+        let status = extract_http_status(&headers_str).unwrap_or(0);
+        if status != 200 {
+            return Err(format!("HTTP {status} from speed test server").into());
+        }
+
         let headers = extract_http_headers(&headers_str);
         let server_time = headers
             .get(HeaderName::from_static("server-timing"))

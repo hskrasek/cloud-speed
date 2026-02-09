@@ -2,7 +2,7 @@ use crate::cloudflare::requests::UA;
 use crate::cloudflare::tests::connection::{
     measure_tcp_latency, resolve_dns, tcp_connect, tls_handshake_duration,
 };
-use crate::cloudflare::tests::{IoReadAndWrite, Test, TestResults, BASE_URL};
+use crate::cloudflare::tests::{extract_http_status, IoReadAndWrite, Test, TestResults, BASE_URL};
 use log::{debug, info};
 use std::borrow::Cow;
 use std::error::Error;
@@ -169,6 +169,14 @@ async fn execute_http_post(
             }
         }
 
+        // Check HTTP status code
+        let headers_str = String::from_utf8(headers)
+            .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+        let status = extract_http_status(&headers_str).unwrap_or(0);
+        if status != 200 {
+            return Err(format!("HTTP {status} from speed test server").into());
+        }
+
         // Read any remaining response body (we don't need server-timing for uploads)
         let mut buff = Vec::new();
         tcp.read_to_end(&mut buff)?;
@@ -290,6 +298,14 @@ async fn execute_http_post_with_latency(
             {
                 break;
             }
+        }
+
+        // Check HTTP status code
+        let headers_str = String::from_utf8(headers)
+            .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+        let status = extract_http_status(&headers_str).unwrap_or(0);
+        if status != 200 {
+            return Err(format!("HTTP {status} from speed test server").into());
         }
 
         // Read any remaining response body (we don't need server-timing for uploads)
