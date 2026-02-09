@@ -70,16 +70,17 @@ impl Upload {
 
         let (ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
-        let (stream, tcp_connect_duration) = tcp_connect(ip_address, port)?;
-        let (mut stream, _tls_handshake_duration) =
-            tls_handshake_duration(stream, &url)?;
+        let (stream, tcp_connect_duration) = tcp_connect(ip_address, port).await?;
+        let host = url.host_str().unwrap_or("").to_string();
+        let (stream, _tls_handshake_duration) =
+            tls_handshake_duration(stream, host).await?;
 
         // Execute HTTP POST with concurrent latency measurements
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
             execute_http_post_with_latency(
-                &mut stream,
+                stream,
                 &url,
-                &self.data,
+                self.data.clone(),
                 ip_address,
                 port,
                 latency_tx,
@@ -113,11 +114,12 @@ impl Test for Upload {
 
         let (_ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
-        let (stream, tcp_connect_duration) = tcp_connect(_ip_address, port)?;
-        let (mut stream, _tls_handshake_duration) =
-            tls_handshake_duration(stream, &url)?;
+        let (stream, tcp_connect_duration) = tcp_connect(_ip_address, port).await?;
+        let host = url.host_str().unwrap_or("").to_string();
+        let (stream, _tls_handshake_duration) =
+            tls_handshake_duration(stream, host).await?;
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
-            execute_http_post(&mut stream, &url, &self.data)?;
+            execute_http_post(stream, url, self.data.clone()).await?;
 
         Ok(TestResults::new(
             tcp_connect_duration,
@@ -129,53 +131,57 @@ impl Test for Upload {
     }
 }
 
-fn execute_http_post(
-    tcp: &mut Box<dyn IoReadAndWrite>,
-    url: &Url,
-    data: &[u8],
+async fn execute_http_post(
+    mut tcp: Box<dyn IoReadAndWrite>,
+    url: Url,
+    data: Vec<u8>,
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
-    let header = build_http_post_header(url, data.len());
-    debug!("\r\n{}", header);
-    let upload_start = Instant::now();
+    tokio::task::spawn_blocking(move || {
+        let header = build_http_post_header(&url, data.len());
+        debug!("\r\n{}", header);
+        let upload_start = Instant::now();
 
-    // Write headers
-    tcp.write_all(header.as_bytes())?;
-    // Write body - this is the actual upload
-    tcp.write_all(data)?;
-    tcp.flush()?;
+        // Write headers
+        tcp.write_all(header.as_bytes())?;
+        // Write body - this is the actual upload
+        tcp.write_all(&data)?;
+        tcp.flush()?;
 
-    // Read first byte (TTFB) - this marks when server received all data
-    // and started responding
-    let mut one_byte_buffer = [0_u8];
-    tcp.read_exact(&mut one_byte_buffer)?;
+        // Read first byte (TTFB) - this marks when server received all data
+        // and started responding
+        let mut one_byte_buffer = [0_u8];
+        tcp.read_exact(&mut one_byte_buffer)?;
 
-    // For uploads, the transfer time is from start of write to TTFB
-    // This captures the actual network transfer time
-    let upload_duration = upload_start.elapsed();
+        // For uploads, the transfer time is from start of write to TTFB
+        // This captures the actual network transfer time
+        let upload_duration = upload_start.elapsed();
 
-    // Read headers
-    let mut headers: Vec<u8> = Vec::new();
-    headers.push(one_byte_buffer[0]);
-
-    while tcp.read(&mut one_byte_buffer)? > 0 {
+        // Read headers
+        let mut headers: Vec<u8> = Vec::new();
         headers.push(one_byte_buffer[0]);
-        if headers.len() >= 4
-            && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
-            break;
+
+        while tcp.read(&mut one_byte_buffer)? > 0 {
+            headers.push(one_byte_buffer[0]);
+            if headers.len() >= 4
+                && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+            {
+                break;
+            }
         }
-    }
 
-    // Read any remaining response body (we don't need server-timing for uploads)
-    let mut buff = Vec::new();
-    tcp.read_to_end(&mut buff)?;
+        // Read any remaining response body (we don't need server-timing for uploads)
+        let mut buff = Vec::new();
+        tcp.read_to_end(&mut buff)?;
 
-    // For uploads: return upload_duration as end_duration and Duration::ZERO
-    // for both ttfb and server_time. This way:
-    // - transfer_duration() = end_duration - ttfb = upload_duration
-    // - bandwidth calculation uses upload_duration directly without subtracting
-    //   server_time (which for uploads includes the receive time)
-    Ok((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
+        // For uploads: return upload_duration as end_duration and Duration::ZERO
+        // for both ttfb and server_time. This way:
+        // - transfer_duration() = end_duration - ttfb = upload_duration
+        // - bandwidth calculation uses upload_duration directly without subtracting
+        //   server_time (which for uploads includes the receive time)
+        Ok::<_, Box<dyn Error + Send + Sync>>((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
+    })
+    .await?
+    .map_err(|e| e as Box<dyn Error>)
 }
 
 fn build_http_post_header(url: &Url, content_length: usize) -> String {
@@ -202,9 +208,9 @@ fn build_http_post_header(url: &Url, content_length: usize) -> String {
 /// are only included if the request duration exceeds the minimum threshold.
 #[allow(clippy::too_many_arguments)]
 async fn execute_http_post_with_latency(
-    tcp: &mut Box<dyn IoReadAndWrite>,
+    mut tcp: Box<dyn IoReadAndWrite>,
     url: &Url,
-    data: &[u8],
+    data: Vec<u8>,
     ip_address: IpAddr,
     port: u16,
     latency_tx: mpsc::Sender<f64>,
@@ -215,11 +221,8 @@ async fn execute_http_post_with_latency(
     debug!("\r\n{}", header);
     let upload_start = Instant::now();
 
-    // Start latency measurement task before upload begins
-    let latency_tx_clone = latency_tx.clone();
     let throttle_duration = Duration::from_millis(throttle_ms);
     let min_duration = Duration::from_millis(min_request_duration_ms);
-    let upload_start_clone = upload_start;
 
     // Use Arc to share the stop flag between tasks
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -248,11 +251,11 @@ async fn execute_http_post_with_latency(
             }
 
             // Only measure if request has been running long enough
-            let request_duration = upload_start_clone.elapsed();
+            let request_duration = upload_start.elapsed();
             if request_duration >= min_duration {
                 // Measure latency using TCP handshake time
-                if let Ok(latency_ms) = measure_tcp_latency(ip_address, port) {
-                    let _ = latency_tx_clone.send(latency_ms).await;
+                if let Ok(latency_ms) = measure_tcp_latency(ip_address, port).await {
+                    let _ = latency_tx.send(latency_ms).await;
                 }
             }
 
@@ -260,37 +263,48 @@ async fn execute_http_post_with_latency(
         }
     });
 
-    // Write headers
-    tcp.write_all(header.as_bytes())?;
-    // Write body - this is the actual upload
-    tcp.write_all(data)?;
-    tcp.flush()?;
+    let result = tokio::task::spawn_blocking(move || {
+        // Write headers
+        tcp.write_all(header.as_bytes())?;
+        // Write body - this is the actual upload
+        tcp.write_all(&data)?;
+        tcp.flush()?;
 
-    // Read first byte (TTFB) - this marks when server received all data
-    // and started responding
-    let mut one_byte_buffer = [0_u8];
-    tcp.read_exact(&mut one_byte_buffer)?;
+        // Read first byte (TTFB) - this marks when server received all data
+        // and started responding
+        let mut one_byte_buffer = [0_u8];
+        tcp.read_exact(&mut one_byte_buffer)?;
 
-    // For uploads, the transfer time is from start of write to TTFB
-    // This captures the actual network transfer time
-    let upload_duration = upload_start.elapsed();
+        // For uploads, the transfer time is from start of write to TTFB
+        // This captures the actual network transfer time
+        let upload_duration = upload_start.elapsed();
 
-    // Read headers
-    let mut headers: Vec<u8> = Vec::new();
-    headers.push(one_byte_buffer[0]);
-
-    while tcp.read(&mut one_byte_buffer)? > 0 {
+        // Read headers
+        let mut headers: Vec<u8> = Vec::new();
         headers.push(one_byte_buffer[0]);
-        if headers.len() >= 4
-            && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
-            break;
-        }
-    }
 
-    // Read any remaining response body (we don't need server-timing for uploads)
-    let mut buff = Vec::new();
-    tcp.read_to_end(&mut buff)?;
+        while tcp.read(&mut one_byte_buffer)? > 0 {
+            headers.push(one_byte_buffer[0]);
+            if headers.len() >= 4
+                && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+            {
+                break;
+            }
+        }
+
+        // Read any remaining response body (we don't need server-timing for uploads)
+        let mut buff = Vec::new();
+        tcp.read_to_end(&mut buff)?;
+
+        // For uploads: return upload_duration as end_duration and Duration::ZERO
+        // for both ttfb and server_time. This way:
+        // - transfer_duration() = end_duration - ttfb = upload_duration
+        // - bandwidth calculation uses upload_duration directly without subtracting
+        //   server_time (which for uploads includes the receive time)
+        Ok::<_, Box<dyn Error + Send + Sync>>((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
+    })
+    .await?
+    .map_err(|e| e as Box<dyn Error>)?;
 
     // Signal latency task to stop (Release ensures visibility to other thread)
     stop_flag.store(true, std::sync::atomic::Ordering::Release);
@@ -299,10 +313,5 @@ async fn execute_http_post_with_latency(
     let _ =
         tokio::time::timeout(Duration::from_millis(100), latency_handle).await;
 
-    // For uploads: return upload_duration as end_duration and Duration::ZERO
-    // for both ttfb and server_time. This way:
-    // - transfer_duration() = end_duration - ttfb = upload_duration
-    // - bandwidth calculation uses upload_duration directly without subtracting
-    //   server_time (which for uploads includes the receive time)
-    Ok((upload_duration, Duration::ZERO, Duration::ZERO, upload_duration))
+    Ok(result)
 }

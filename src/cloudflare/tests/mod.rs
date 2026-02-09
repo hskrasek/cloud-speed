@@ -11,9 +11,9 @@ pub(crate) mod upload;
 
 pub(crate) static BASE_URL: &str = "https://speed.cloudflare.com";
 
-pub trait IoReadAndWrite: Read + Write {}
+pub trait IoReadAndWrite: Read + Write + Send {}
 
-impl<T: Read + Write> IoReadAndWrite for T {}
+impl<T: Read + Write + Send> IoReadAndWrite for T {}
 
 pub(crate) trait Test {
     fn endpoint(&'_ self) -> Cow<'_, str>;

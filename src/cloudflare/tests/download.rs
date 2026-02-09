@@ -48,14 +48,15 @@ impl Download {
 
         let (ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
-        let (stream, tcp_connect_duration) = tcp_connect(ip_address, port)?;
-        let (mut stream, _tls_handshake_duration) =
-            tls_handshake_duration(stream, &url)?;
+        let (stream, tcp_connect_duration) = tcp_connect(ip_address, port).await?;
+        let host = url.host_str().unwrap_or("").to_string();
+        let (stream, _tls_handshake_duration) =
+            tls_handshake_duration(stream, host).await?;
 
         // Execute HTTP GET with concurrent latency measurements
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
             execute_http_get_with_latency(
-                &mut stream,
+                stream,
                 &url,
                 ip_address,
                 port,
@@ -89,11 +90,12 @@ impl Test for Download {
 
         let (_ip_address, _dns_duration) = resolve_dns(&url).await?;
         let port = url.port_or_known_default().unwrap();
-        let (stream, tcp_connect_duration) = tcp_connect(_ip_address, port)?;
-        let (mut stream, _tls_handshake_duration) =
-            tls_handshake_duration(stream, &url)?;
+        let (stream, tcp_connect_duration) = tcp_connect(_ip_address, port).await?;
+        let host = url.host_str().unwrap_or("").to_string();
+        let (stream, _tls_handshake_duration) =
+            tls_handshake_duration(stream, host).await?;
         let (_connect_duration, ttfb_duration, server_time, end_duration) =
-            execute_http_get(&mut stream, &url)?;
+            execute_http_get(stream, url).await?;
 
         Ok(TestResults::new(
             tcp_connect_duration,
@@ -105,54 +107,59 @@ impl Test for Download {
     }
 }
 
-fn execute_http_get(
-    tcp: &mut Box<dyn IoReadAndWrite>,
-    url: &Url,
+async fn execute_http_get(
+    mut tcp: Box<dyn IoReadAndWrite>,
+    url: Url,
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
-    let header = build_http_header(url);
+    let header = build_http_header(&url);
     debug!("\r\n{}", header);
-    let now = Instant::now();
 
-    tcp.write_all(header.as_bytes())?;
-    tcp.flush()?;
+    tokio::task::spawn_blocking(move || {
+        let now = Instant::now();
 
-    let connect_duration = now.elapsed();
+        tcp.write_all(header.as_bytes())?;
+        tcp.flush()?;
 
-    let mut one_byte_buffer = [0_u8];
-    let now = Instant::now();
-    tcp.read_exact(&mut one_byte_buffer)?;
-    let ttfb_duration = now.elapsed();
+        let connect_duration = now.elapsed();
 
-    let mut headers: Vec<u8> = Vec::new();
-    headers.push(one_byte_buffer[0]);
+        let mut one_byte_buffer = [0_u8];
+        let now = Instant::now();
+        tcp.read_exact(&mut one_byte_buffer)?;
+        let ttfb_duration = now.elapsed();
 
-    while tcp.read(&mut one_byte_buffer)? > 0 {
+        let mut headers: Vec<u8> = Vec::new();
         headers.push(one_byte_buffer[0]);
-        if headers.len() >= 4
-            && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
-            break;
+
+        while tcp.read(&mut one_byte_buffer)? > 0 {
+            headers.push(one_byte_buffer[0]);
+            if headers.len() >= 4
+                && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+            {
+                break;
+            }
         }
-    }
 
-    let headers_str = String::from_utf8(headers)
-        .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
-    let headers = extract_http_headers(&headers_str);
+        let headers_str = String::from_utf8(headers)
+            .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+        let headers = extract_http_headers(&headers_str);
 
-    // Extract server processing time from server-timing header
-    let server_time = headers
-        .get(HeaderName::from_static("server-timing"))
-        .and_then(|h| h.to_str().ok())
-        .and_then(parse_server_timing)
-        .unwrap_or(Duration::ZERO);
+        // Extract server processing time from server-timing header
+        let server_time = headers
+            .get(HeaderName::from_static("server-timing"))
+            .and_then(|h| h.to_str().ok())
+            .and_then(parse_server_timing)
+            .unwrap_or(Duration::ZERO);
 
-    let mut buff = Vec::new();
+        let mut buff = Vec::new();
 
-    tcp.read_to_end(&mut buff)?;
+        tcp.read_to_end(&mut buff)?;
 
-    let end_duration = now.elapsed();
+        let end_duration = now.elapsed();
 
-    Ok((connect_duration, ttfb_duration, server_time, end_duration))
+        Ok::<_, Box<dyn Error + Send + Sync>>((connect_duration, ttfb_duration, server_time, end_duration))
+    })
+    .await?
+    .map_err(|e| e as Box<dyn Error>)
 }
 
 fn build_http_header(url: &Url) -> String {
@@ -161,7 +168,7 @@ fn build_http_header(url: &Url) -> String {
         Host: {}\r\n\
         User-Agent: {}\r\n\
         Accept: */*\r\n\
-        Accept-Encoding: gzip, deflate, br, zstd\r\n\
+        Accept-Encoding: identity\r\n\
         Connection: close\r\n\
         \r\n",
         url.path(),
@@ -208,7 +215,7 @@ fn extract_http_headers(raw_headers: &str) -> HeaderMap {
 /// task that measures latency at regular intervals. Latency measurements
 /// are only included if the request duration exceeds the minimum threshold.
 async fn execute_http_get_with_latency(
-    tcp: &mut Box<dyn IoReadAndWrite>,
+    mut tcp: Box<dyn IoReadAndWrite>,
     url: &Url,
     ip_address: IpAddr,
     port: u16,
@@ -218,18 +225,10 @@ async fn execute_http_get_with_latency(
 ) -> Result<(Duration, Duration, Duration, Duration), Box<dyn Error>> {
     let header = build_http_header(url);
     debug!("\r\n{}", header);
-    let request_start = Instant::now();
 
-    tcp.write_all(header.as_bytes())?;
-    tcp.flush()?;
-
-    let connect_duration = request_start.elapsed();
-
-    // Start latency measurement task
-    let latency_tx_clone = latency_tx.clone();
     let throttle_duration = Duration::from_millis(throttle_ms);
     let min_duration = Duration::from_millis(min_request_duration_ms);
-    let request_start_clone = request_start;
+    let request_start = Instant::now();
 
     // Use Arc to share the stop flag between tasks
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -258,11 +257,11 @@ async fn execute_http_get_with_latency(
             }
 
             // Only measure if request has been running long enough
-            let request_duration = request_start_clone.elapsed();
+            let request_duration = request_start.elapsed();
             if request_duration >= min_duration {
                 // Measure latency using TCP handshake time
-                if let Ok(latency_ms) = measure_tcp_latency(ip_address, port) {
-                    let _ = latency_tx_clone.send(latency_ms).await;
+                if let Ok(latency_ms) = measure_tcp_latency(ip_address, port).await {
+                    let _ = latency_tx.send(latency_ms).await;
                 }
             }
 
@@ -270,48 +269,53 @@ async fn execute_http_get_with_latency(
         }
     });
 
-    // Read first byte (TTFB)
-    let mut one_byte_buffer = [0_u8];
-    let ttfb_start = Instant::now();
-    tcp.read_exact(&mut one_byte_buffer)?;
-    let ttfb_duration = ttfb_start.elapsed();
+    let result = tokio::task::spawn_blocking(move || {
+        let request_start = Instant::now();
 
-    // Read headers
-    let mut headers: Vec<u8> = Vec::new();
-    headers.push(one_byte_buffer[0]);
+        tcp.write_all(header.as_bytes())?;
+        tcp.flush()?;
+        let connect_duration = request_start.elapsed();
 
-    while tcp.read(&mut one_byte_buffer)? > 0 {
+        // Read TTFB
+        let mut one_byte_buffer = [0_u8];
+        let ttfb_start = Instant::now();
+        tcp.read_exact(&mut one_byte_buffer)?;
+        let ttfb_duration = ttfb_start.elapsed();
+
+        // Read headers
+        let mut headers: Vec<u8> = Vec::new();
         headers.push(one_byte_buffer[0]);
-        if headers.len() >= 4
-            && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
-            break;
+        while tcp.read(&mut one_byte_buffer)? > 0 {
+            headers.push(one_byte_buffer[0]);
+            if headers.len() >= 4
+                && headers[headers.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+            {
+                break;
+            }
         }
-    }
 
-    let headers_str = String::from_utf8(headers)
-        .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
-    let headers = extract_http_headers(&headers_str);
+        let headers_str = String::from_utf8(headers)
+            .map_err(|e| format!("Invalid UTF-8 in HTTP headers: {}", e))?;
+        let headers = extract_http_headers(&headers_str);
+        let server_time = headers
+            .get(HeaderName::from_static("server-timing"))
+            .and_then(|h| h.to_str().ok())
+            .and_then(parse_server_timing)
+            .unwrap_or(Duration::ZERO);
 
-    // Extract server processing time from server-timing header
-    let server_time = headers
-        .get(HeaderName::from_static("server-timing"))
-        .and_then(|h| h.to_str().ok())
-        .and_then(parse_server_timing)
-        .unwrap_or(Duration::ZERO);
+        // Read body - the long blocking operation
+        let mut buff = Vec::new();
+        tcp.read_to_end(&mut buff)?;
+        let end_duration = ttfb_start.elapsed();
 
-    // Read body
-    let mut buff = Vec::new();
-    tcp.read_to_end(&mut buff)?;
+        Ok::<_, Box<dyn Error + Send + Sync>>((connect_duration, ttfb_duration, server_time, end_duration))
+    })
+    .await?
+    .map_err(|e| e as Box<dyn Error>)?;
 
-    let end_duration = ttfb_start.elapsed();
-
-    // Signal latency task to stop (Release ensures visibility to other thread)
+    // Signal latency task to stop
     stop_flag.store(true, std::sync::atomic::Ordering::Release);
+    let _ = tokio::time::timeout(Duration::from_millis(100), latency_handle).await;
 
-    // Wait for latency task to finish (with timeout)
-    let _ =
-        tokio::time::timeout(Duration::from_millis(100), latency_handle).await;
-
-    Ok((connect_duration, ttfb_duration, server_time, end_duration))
+    Ok(result)
 }
